@@ -41,6 +41,14 @@ document.getElementById('debugCopy').addEventListener('click', () => {
   port.postMessage({ cmd: 'debug_dump', limit: 50 });
   setStatus('debug ログ取得中…');
 });
+document.getElementById('clearLog').addEventListener('click', () => {
+  // 表示と SW の replay バッファの両方を消す (バッファを残すと panel 再オープンで
+  // 全部戻ってくる)。host 側の debug.sqlite はそのまま (debug コピーで参照可能)。
+  timeline.textContent = '';
+  lastAssistantText = '';
+  port.postMessage({ cmd: 'clear_log' });
+  setStatus('log をクリアしました');
+});
 
 // --- draft PR 一覧 (#4, API: ippoan/ci-dashboard#470) --------------------
 // ci-dashboard の webhook-fed 一覧を CF Access cookie 相乗りで fetch する。
