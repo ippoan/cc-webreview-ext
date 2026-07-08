@@ -5,6 +5,7 @@
   "description": "draft PR のブラウザ込みレビューを claude (native host 経由) で回す side panel 拡張",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv2ClRf5U3PHGq1q44pVRlQuKdPnMW9j8Vsu8vmcHJmPLEta4H/XBqPhJPS8cMw3M/DfuZVfEFzbVUjhNctG7aScg3pG94/d7nRBnnRKNkS7xQs+SrjRJ7WaFtLIFXHmoSfeCbL3AKXCA+wuAHHeW18Bygo++W4mCpJaZv+l/7LZzjhGFJIZF47B/x1WnIz56tZJPX5qDBlWqk1S0hH+AwTWes3HFSM/5RZnupDDmhE4yDmSQ3g5Mz4o08xQqX0WCoLuae2cc6gi0igI95Q+QhP8XSdnKPCtyMxe19GFlWda2aQSFJm6yF7pgtF4i6UG9nMT8CxkdCitlIXkva9NiDQIDAQAB",
   "permissions": ["nativeMessaging", "sidePanel"],
+  "host_permissions": ["https://ci-dashboard.ippoan.org/*"],
   "side_panel": {
     "default_path": "sidepanel.html"
   },
