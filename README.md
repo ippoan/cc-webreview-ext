@@ -99,10 +99,10 @@ cargo build --release
 
 ## プロトコル (拡張 ↔ host)
 
-- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}` / `{cmd:"term_start", cols, rows, chrome?, extra_args?, cwd?}` / `{cmd:"term_input", data}` / `{cmd:"term_resize", cols, rows}` / `{cmd:"term_kill"}`
+- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}` / `{cmd:"term_start", cols, rows, chrome?, extra_args?, cwd?}` / `{cmd:"term_input", data}` / `{cmd:"term_resize", cols, rows}` / `{cmd:"term_kill"}` / `{cmd:"debug_dump", limit?}`
 - **prompt は claude の stdin に渡す** (argv 渡しは改行入り prompt が `cmd /C` で分断され、
   `-` 始まりの行が `unknown option` になるため禁止)
-- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"|"term_out"|"term_exit"}`。
+- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"|"term_out"|"term_exit"|"debug_dump"}`。
   `term_out.data` は base64 (PTY チャンクは UTF-8 多バイト文字を分断し得るため)。
   512KB 超は `{type:"chunk", id, seq, last, data}` に分割 (background.js が再結合)。
 

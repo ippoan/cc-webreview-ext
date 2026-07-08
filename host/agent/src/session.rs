@@ -46,6 +46,8 @@ pub enum HostCommand {
     },
     /// terminal session を kill する。
     TermKill,
+    /// debug.sqlite の直近 N 件を返す (--debug-dump の side panel 版、#18 診断導線)。
+    DebugDump(i64),
     Unknown(String),
 }
 
@@ -76,6 +78,12 @@ pub fn parse_command(v: &Value) -> HostCommand {
             }
         }
         "term_kill" => HostCommand::TermKill,
+        "debug_dump" => HostCommand::DebugDump(
+            v.get("limit")
+                .and_then(Value::as_i64)
+                .filter(|n| *n > 0 && *n <= 1000)
+                .unwrap_or(50),
+        ),
         "start" => {
             let prompt = v
                 .get("prompt")
@@ -341,6 +349,19 @@ mod tests {
         assert_eq!(
             parse_command(&json!({ "cmd": "term_kill" })),
             HostCommand::TermKill
+        );
+        assert_eq!(
+            parse_command(&json!({ "cmd": "debug_dump" })),
+            HostCommand::DebugDump(50)
+        );
+        assert_eq!(
+            parse_command(&json!({ "cmd": "debug_dump", "limit": 200 })),
+            HostCommand::DebugDump(200)
+        );
+        // 範囲外は default に落とす
+        assert_eq!(
+            parse_command(&json!({ "cmd": "debug_dump", "limit": 999999 })),
+            HostCommand::DebugDump(50)
         );
         assert_eq!(
             parse_command(&json!({ "cmd": "explode" })),
