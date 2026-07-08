@@ -89,8 +89,10 @@ cargo build --release
 
 ## プロトコル (拡張 ↔ host)
 
-- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}`
-- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"}`。
+- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}`
+- **prompt は claude の stdin に渡す** (argv 渡しは改行入り prompt が `cmd /C` で分断され、
+  `-` 始まりの行が `unknown option` になるため禁止)
+- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"}`。
   512KB 超は `{type:"chunk", id, seq, last, data}` に分割 (background.js が再結合)。
 
 ## 開発
