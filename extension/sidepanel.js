@@ -38,6 +38,82 @@ document.getElementById('checkUpdate').addEventListener('click', () => {
   setStatus('更新確認中…');
 });
 
+// --- draft PR 一覧 (#4, API: ippoan/ci-dashboard#470) --------------------
+// ci-dashboard の webhook-fed 一覧を CF Access cookie 相乗りで fetch する。
+// CF Access 未ログイン時は 302 → HTML が返るため、JSON 以外は loud fail
+// (cf-access-staging-public-paths の既知の罠 — 黙って空扱いにしない)。
+
+const CI_DASHBOARD = 'https://ci-dashboard.ippoan.org';
+const prListEl = document.getElementById('prList');
+const prMetaEl = document.getElementById('prMeta');
+
+// 行クリックで prompt に流し込むレビューテンプレ (#5 で本設計するまでの仮)。
+function reviewPrompt(pr) {
+  return [
+    `draft PR ${pr.repo}#${pr.number} をレビューして: ${pr.url}`,
+    'gh pr view / gh pr diff で内容と CI 状態を確認し、必要ならブラウザで PR ページを開いて確認する。',
+    'レビュー結果は PR コメントとして投稿する (指摘リスト + CCoW への引き継ぎチェックリスト)。',
+  ].join('\n');
+}
+
+function renderPrList(prs, updatedAt) {
+  prListEl.textContent = '';
+  prMetaEl.textContent = updatedAt ? `更新: ${updatedAt}` : '';
+  if (!prs.length) {
+    const div = document.createElement('div');
+    div.className = 'pr-empty';
+    div.textContent = 'レビュー待ちの draft PR はありません';
+    prListEl.appendChild(div);
+    return;
+  }
+  for (const pr of prs) {
+    const row = document.createElement('div');
+    row.className = 'pr-row';
+    row.title = `クリックで prompt にレビューテンプレを入れる\n${pr.url}`;
+    const ref = document.createElement('span');
+    ref.className = 'pr-ref';
+    ref.textContent = `${pr.repo}#${pr.number}`;
+    const title = document.createElement('span');
+    title.className = 'pr-title';
+    title.textContent = pr.title;
+    const author = document.createElement('span');
+    author.className = 'pr-author';
+    author.textContent = pr.author;
+    row.append(ref, title, author);
+    row.addEventListener('click', () => {
+      promptEl.value = reviewPrompt(pr);
+      setStatus(`${pr.repo}#${pr.number} のレビューテンプレを prompt に入れました — Start で開始`);
+    });
+    prListEl.appendChild(row);
+  }
+}
+
+async function loadDraftPrs() {
+  prMetaEl.textContent = '取得中…';
+  try {
+    const res = await fetch(`${CI_DASHBOARD}/api/draft-prs`, { credentials: 'include' });
+    const ct = res.headers.get('content-type') || '';
+    if (!res.ok || !ct.includes('application/json')) {
+      throw new Error(
+        `draft-prs 取得失敗 (HTTP ${res.status}, ${ct || 'no content-type'}) — ` +
+          `CF Access 未ログインの可能性。${CI_DASHBOARD} をブラウザで開いてログインしてから再試行`
+      );
+    }
+    const body = await res.json();
+    renderPrList(body.prs || [], body.updatedAt || '');
+  } catch (e) {
+    prMetaEl.textContent = '';
+    prListEl.textContent = '';
+    const div = document.createElement('div');
+    div.className = 'ev-error';
+    div.textContent = String(e && e.message ? e.message : e);
+    prListEl.appendChild(div);
+  }
+}
+
+document.getElementById('prReload').addEventListener('click', loadDraftPrs);
+loadDraftPrs(); // panel を開いたら自動で一度取得する
+
 // --- terminal 埋め込み (#18) -------------------------------------------
 // 対話モードの claude を PTY (host 側 ConPTY) で動かし、xterm.js に生バイトを流す。
 // -p と違い権限承認プロンプトに応答できる。

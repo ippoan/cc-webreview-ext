@@ -9,6 +9,14 @@
     #prompt { width: 100%; box-sizing: border-box; height: 72px; }
     #extraArgs { width: 100%; box-sizing: border-box; margin-top: 4px; font-family: monospace; font-size: 12px; }
     #term { height: 60vh; min-height: 240px; margin-top: 6px; border: 1px solid #444; background: #000; }
+    #prSection { border: 1px solid #ddd; border-radius: 4px; padding: 6px; margin-bottom: 6px; }
+    #prMeta { color: #888; font-size: 11px; }
+    .pr-row { display: flex; gap: 6px; align-items: baseline; padding: 2px 0; cursor: pointer; }
+    .pr-row:hover { background: #f4f8ff; }
+    .pr-ref { font-family: monospace; color: #369; white-space: nowrap; }
+    .pr-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .pr-author { color: #888; font-size: 11px; white-space: nowrap; }
+    .pr-empty { color: #888; }
     .row { display: flex; gap: 6px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
     button { cursor: pointer; }
     #timeline { border-top: 1px solid #ddd; margin-top: 8px; padding-top: 8px; }
@@ -28,6 +36,14 @@
 </head>
 <body>
   <div id="status">host 未接続</div>
+  <div id="prSection">
+    <div class="row">
+      <b>draft PR</b>
+      <button id="prReload">一覧更新</button>
+      <span id="prMeta"></span>
+    </div>
+    <div id="prList"></div>
+  </div>
   <div id="authBanner" hidden>
     ⚠️ <span id="authReason">claude が未ログインの可能性があります</span> —
     <a href="https://github.com/ippoan/cc-webreview-ext/blob/main/docs/spike-claude-chrome.md"
