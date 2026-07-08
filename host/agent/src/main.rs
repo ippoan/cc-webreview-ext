@@ -9,6 +9,7 @@
 //! - `--debug-dump [N]` → debug.sqlite の直近 N 件 (default 100) を JSONL で出す
 //! - それ以外 → usage (stdin 待ちで固まらないように)
 
+mod auth;
 mod debuglog;
 mod nmhost;
 mod register;
@@ -126,6 +127,8 @@ fn run_native_host() {
         "version": version,
         "release_tag": release_tag,
         "claude": claude.as_ref().map(|p| p.display().to_string()),
+        // 認証状態 (boolean のみ、secret の値は含まない — #13)
+        "auth": auth::AuthStatus::probe().to_json(),
     }));
 
     let mut active: Option<Session> = None;
@@ -158,6 +161,8 @@ fn run_native_host() {
                     "release_tag": release_tag,
                     "claude": claude.as_ref().map(|p| p.display().to_string()),
                     "running": active.as_mut().map(Session::is_running).unwrap_or(false),
+                    // 認証状態 (boolean のみ、secret の値は含まない — #13)
+                    "auth": auth::AuthStatus::probe().to_json(),
                 }));
             }
             HostCommand::Start(start) => {
