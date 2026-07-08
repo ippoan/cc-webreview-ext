@@ -6,6 +6,8 @@ const statusEl = document.getElementById('status');
 const timeline = document.getElementById('timeline');
 const promptEl = document.getElementById('prompt');
 const chromeEl = document.getElementById('chrome');
+const authBanner = document.getElementById('authBanner');
+const authReason = document.getElementById('authReason');
 
 const port = chrome.runtime.connect({ name: 'panel' });
 port.onMessage.addListener(render);
@@ -18,6 +20,9 @@ document.getElementById('start').addEventListener('click', () => {
     return;
   }
   timeline.textContent = '';
+  // 再実行時はバナーを一旦引っ込め、新セッションで再検知させる。
+  authBannerSticky = false;
+  authBanner.hidden = true;
   port.postMessage({ cmd: 'start', prompt, chrome: chromeEl.checked });
   setStatus('起動中…');
 });
@@ -26,6 +31,55 @@ document.getElementById('ping').addEventListener('click', () => port.postMessage
 
 function setStatus(text) {
   statusEl.textContent = text;
+}
+
+// --- login 導線 (#13) ---------------------------------------------------
+// 未ログインらしき状態を検知したら setup-token 手順へのバナーを出す。
+// - host の hello/pong `auth` (boolean のみ) → 認証情報が見つからない時に表示
+// - result / stderr の認証エラー文言 → sticky 表示 (credentials があっても壊れて
+//   いる場合があるため、次の pong で auth が true でも消さない)
+
+// docs/spike-claude-chrome.md の既知エラー: `401 Invalid authentication credentials`
+// / `Not logged in`。素の "401" 単独では反応しない (偽陽性防止)。
+const AUTH_ERROR_RE =
+  /not logged in|invalid authentication|invalid api key|please run \/login|401 unauthorized/i;
+
+let authBannerSticky = false;
+
+function showAuthBanner(reason, sticky) {
+  authReason.textContent = reason;
+  authBanner.hidden = false;
+  if (sticky) authBannerSticky = true;
+}
+
+function hideAuthBannerUnlessSticky() {
+  if (!authBannerSticky) authBanner.hidden = true;
+}
+
+// hello / pong の auth (boolean のみ) を反映する。auth 無し = 旧 host は何もしない。
+function applyAuthStatus(auth) {
+  if (!auth) return;
+  if (auth.likely_logged_in) {
+    hideAuthBannerUnlessSticky();
+  } else {
+    showAuthBanner(
+      '認証情報が見つかりません (credentials.json / CLAUDE_CODE_OAUTH_TOKEN とも未検出)',
+      false
+    );
+  }
+}
+
+// hello / pong の status 行に付ける認証ラベル。auth 無し (旧 host) は空。
+function authLabel(auth) {
+  if (!auth) return '';
+  return auth.likely_logged_in ? ' / login: ✓' : ' / login: ✗';
+}
+
+// result / stderr のテキストから認証エラーを検知する。
+function detectAuthError(text) {
+  if (typeof text === 'string' && AUTH_ERROR_RE.test(text)) {
+    showAuthBanner('認証エラーを検知しました (未ログインまたは token 失効)', true);
+  }
 }
 
 function add(cls, text) {
@@ -84,6 +138,7 @@ function renderClaudeEvent(data) {
   }
   if (t === 'result') {
     setStatus(`完了 (${data.subtype || 'result'})`);
+    detectAuthError(data.result);
     const lines = [
       data.result || '',
       '',
@@ -100,20 +155,24 @@ function render(msg) {
   if (!msg || !msg.type) return;
   switch (msg.type) {
     case 'hello':
-      setStatus(`host v${msg.version} 接続 / claude: ${msg.claude || '未解決'}`);
+      setStatus(`host v${msg.version} 接続 / claude: ${msg.claude || '未解決'}${authLabel(msg.auth)}`);
+      applyAuthStatus(msg.auth);
       break;
     case 'pong':
       setStatus(
-        `host v${msg.version} / claude: ${msg.claude || '未解決'} / running: ${msg.running}`
+        `host v${msg.version} / claude: ${msg.claude || '未解決'} / running: ${msg.running}${authLabel(msg.auth)}`
       );
+      applyAuthStatus(msg.auth);
       break;
     case 'claude':
       renderClaudeEvent(msg.data || {});
       break;
     case 'raw':
+      detectAuthError(msg.data);
       add('ev-stderr', `raw: ${msg.data}`);
       break;
     case 'stderr':
+      detectAuthError(msg.data);
       add('ev-stderr', msg.data);
       break;
     case 'proc':

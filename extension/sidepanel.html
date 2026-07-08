@@ -18,10 +18,22 @@
     .ev-result { border: 1px solid #9c9; background: #f4fff4; padding: 6px; border-radius: 4px; white-space: pre-wrap; }
     details { color: #777; }
     details pre { max-height: 160px; overflow: auto; }
+    #authBanner { border: 1px solid #e0b050; background: #fff7e5; padding: 8px; border-radius: 4px; margin-bottom: 6px; }
+    #authBanner .steps { color: #775; margin-top: 4px; }
+    #authBanner code { background: #f2ead5; padding: 0 3px; border-radius: 2px; }
   </style>
 </head>
 <body>
   <div id="status">host 未接続</div>
+  <div id="authBanner" hidden>
+    ⚠️ <span id="authReason">claude が未ログインの可能性があります</span> —
+    <a href="https://github.com/ippoan/cc-webreview-ext/blob/main/docs/spike-claude-chrome.md"
+       target="_blank" rel="noreferrer">解決手順を開く</a>
+    <div class="steps">
+      claude を最新化 → <code>claude setup-token</code> →
+      <code>setx CLAUDE_CODE_OAUTH_TOKEN "&lt;token&gt;"</code> → Chrome 完全再起動
+    </div>
+  </div>
   <textarea id="prompt" placeholder="claude に渡す prompt (例: このリポジトリの README を要約して)"></textarea>
   <div class="row">
     <label><input type="checkbox" id="chrome"> --chrome</label>
