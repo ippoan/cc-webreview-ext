@@ -14,6 +14,7 @@ mod debuglog;
 mod nmhost;
 mod register;
 mod session;
+mod update;
 
 use debuglog::DebugLog;
 use nmhost::SharedWriter;
@@ -130,6 +131,40 @@ fn run_native_host() {
         // 認証状態 (boolean のみ、secret の値は含まない — #13)
         "auth": auth::AuthStatus::probe().to_json(),
     }));
+
+    // 更新チェック (#6) はバックグラウンドで行い、stdio ループを塞がない。
+    // agent 本体は self_replace され**次回起動で反映**、拡張は extension\ を上書きし
+    // Chrome の拡張リロードで反映される。適用時のみ {type:"update"} を side panel に通知。
+    {
+        let writer = Arc::clone(&writer);
+        let log = Arc::clone(&log);
+        std::thread::spawn(move || {
+            let send = |v: serde_json::Value| {
+                log.log("out", v["type"].as_str().unwrap_or("?"), &v);
+                let _ = writer.send(&v);
+            };
+            match update::check_and_self_update() {
+                Ok(Some(tag)) => {
+                    send(json!({ "type": "update", "component": "agent", "tag": tag }))
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[cc-webreview-agent] self-update: {e}");
+                    log.note("self_update_error", &e);
+                }
+            }
+            match update::update_extension() {
+                Ok(Some(tag)) => {
+                    send(json!({ "type": "update", "component": "extension", "tag": tag }))
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[cc-webreview-agent] extension update: {e}");
+                    log.note("ext_update_error", &e);
+                }
+            }
+        });
+    }
 
     let mut active: Option<Session> = None;
 

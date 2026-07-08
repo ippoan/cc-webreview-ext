@@ -181,6 +181,15 @@ function render(msg) {
       }
       add('ev-proc', `proc: ${msg.event}${msg.code != null ? ` code=${msg.code}` : ''}`);
       break;
+    case 'update':
+      // host 起動時のバックグラウンド更新 (#6)。適用された時だけ届く。
+      add(
+        'ev-proc',
+        msg.component === 'extension'
+          ? `拡張を ${msg.tag} に更新しました → chrome://extensions でリロードすると反映されます`
+          : `agent を ${msg.tag} に更新しました (次回の起動から反映されます)`
+      );
+      break;
     case 'busy':
       setStatus('busy: 既にセッションが走っています');
       break;

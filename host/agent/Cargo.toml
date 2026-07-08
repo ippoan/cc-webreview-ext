@@ -12,6 +12,17 @@ serde_json = "1"
 # (Windows / CCoW どちらも外部 DLL 不要)。
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# self-update (#6): GitHub Releases → minisign 検証 → self_replace。cdp-relay agent と
+# 同構成 (ring 依存を避けるため ureq は native-tls)。
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+native-tls = "0.2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+self-replace = "1"
+url = "2"
+# self-update asset (Windows zip) の detached minisign 署名を検証する。
+# 検証専用の軽量 crate (署名生成は CI 側の minisign が担う)。
+minisign-verify = "0.2"
+
 # HKCU NativeMessagingHosts / claude path の registry 読み書き。Windows のみ。
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
