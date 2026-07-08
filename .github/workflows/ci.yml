@@ -2,6 +2,7 @@ name: ci
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -43,3 +44,20 @@ jobs:
           for f in extension/*.js; do node --check "$f"; done
       - name: manifest.json parse
         run: python3 -c "import json; json.load(open('extension/manifest.json'))"
+
+  # CI green → squash auto-merge (cdp-relay 等の org 標準パターン)。
+  # deploy 系 job は本 repo に無いので deploy gate はそのまま通る。
+  auto-merge:
+    name: Auto Merge
+    needs: [rust, extension]
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      needs.rust.result == 'success' &&
+      needs.extension.result == 'success'
+    uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+    secrets: inherit
