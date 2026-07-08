@@ -93,6 +93,18 @@
         <RegistryValue Root='HKCU' Key='Software\ippoan\cc-webreview'
           Name='extension' Type='integer' Value='1' KeyPath='yes' />
       </Component>
+      <!-- xterm.js vendor (terminal 埋め込み #18)。既存 Component への File 追加は
+           component rules 違反になるため別 Component にする。 -->
+      <Component Id='ExtVendorComp' Guid='E6B7242E-3CCC-4CED-BD2E-007FF28C7FCB' Win64='yes'>
+        <File Id='ExtXtermJs' Name='xterm.js'
+          Source='$(var.CargoTargetBinDir)\extension\xterm.js' />
+        <File Id='ExtXtermCss' Name='xterm.css'
+          Source='$(var.CargoTargetBinDir)\extension\xterm.css' />
+        <File Id='ExtAddonFitJs' Name='addon-fit.js'
+          Source='$(var.CargoTargetBinDir)\extension\addon-fit.js' />
+        <RegistryValue Root='HKCU' Key='Software\ippoan\cc-webreview'
+          Name='extension-vendor' Type='integer' Value='1' KeyPath='yes' />
+      </Component>
     </DirectoryRef>
 
     <Feature
@@ -106,6 +118,7 @@
       Absent='disallow'>
       <ComponentRef Id='AgentExeComp' />
       <ComponentRef Id='ExtensionComp' />
+      <ComponentRef Id='ExtVendorComp' />
     </Feature>
 
     <!--

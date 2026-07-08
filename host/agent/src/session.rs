@@ -35,6 +35,17 @@ pub enum HostCommand {
     Stop,
     /// 手動更新チェック (#6)。結果は {type:"update_status"} で返す。
     CheckUpdate,
+    /// terminal session (#18): 対話モード claude を PTY 配下で開始。
+    TermStart(crate::term::TermStart),
+    /// xterm.js onData の入力文字列を PTY に書く。
+    TermInput(String),
+    /// 端末サイズ変更。
+    TermResize {
+        cols: u16,
+        rows: u16,
+    },
+    /// terminal session を kill する。
+    TermKill,
     Unknown(String),
 }
 
@@ -44,6 +55,27 @@ pub fn parse_command(v: &Value) -> HostCommand {
         "ping" => HostCommand::Ping,
         "stop" => HostCommand::Stop,
         "check_update" => HostCommand::CheckUpdate,
+        "term_start" => HostCommand::TermStart(crate::term::parse_term_start(v)),
+        "term_input" => HostCommand::TermInput(
+            v.get("data")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        ),
+        "term_resize" => {
+            let dim = |k: &str, default: u16| {
+                v.get(k)
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u16::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                    .unwrap_or(default)
+            };
+            HostCommand::TermResize {
+                cols: dim("cols", 80),
+                rows: dim("rows", 24),
+            }
+        }
+        "term_kill" => HostCommand::TermKill,
         "start" => {
             let prompt = v
                 .get("prompt")
@@ -294,6 +326,21 @@ mod tests {
         assert_eq!(
             parse_command(&json!({ "cmd": "check_update" })),
             HostCommand::CheckUpdate
+        );
+        assert_eq!(
+            parse_command(&json!({ "cmd": "term_input", "data": "ls\r" })),
+            HostCommand::TermInput("ls\r".to_string())
+        );
+        assert_eq!(
+            parse_command(&json!({ "cmd": "term_resize", "cols": 120, "rows": 30 })),
+            HostCommand::TermResize {
+                cols: 120,
+                rows: 30
+            }
+        );
+        assert_eq!(
+            parse_command(&json!({ "cmd": "term_kill" })),
+            HostCommand::TermKill
         );
         assert_eq!(
             parse_command(&json!({ "cmd": "explode" })),

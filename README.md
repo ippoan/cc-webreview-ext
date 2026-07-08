@@ -87,12 +87,23 @@ cargo build --release
 | 何が起きたか分からない | `cc-webreview-agent.exe --debug-dump 200` — host を通った全イベント (制御 msg / stream-json / stderr / proc) が `%LOCALAPPDATA%\cc-webreview\debug.sqlite` に残っている。sqlite3 で直接 `SELECT * FROM events` も可 |
 | busy と言われる | 既に claude セッションが走っている。`Stop` してから再実行 |
 
+## ターミナルモード
+
+`-p` (headless) は権限承認プロンプトに応答できない。side panel の **Terminal** ボタンは
+対話モードの claude を PTY (Windows: ConPTY) 配下で起動し、xterm.js (同梱 vendor) に
+生画面を流す — 承認プロンプト・`/login`・`/chrome` がそのまま使える。
+
+- `--chrome` checkbox / 追加 CLI 引数は Terminal 起動にも効く
+- -p セッションと terminal は**同時 1 本** (`busy` で拒否)
+- panel を閉じる / `Term 終了` で claude は kill される (ゾンビを残さない)
+
 ## プロトコル (拡張 ↔ host)
 
-- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}`
+- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}` / `{cmd:"term_start", cols, rows, chrome?, extra_args?, cwd?}` / `{cmd:"term_input", data}` / `{cmd:"term_resize", cols, rows}` / `{cmd:"term_kill"}`
 - **prompt は claude の stdin に渡す** (argv 渡しは改行入り prompt が `cmd /C` で分断され、
   `-` 始まりの行が `unknown option` になるため禁止)
-- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"}`。
+- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"|"term_out"|"term_exit"}`。
+  `term_out.data` は base64 (PTY チャンクは UTF-8 多バイト文字を分断し得るため)。
   512KB 超は `{type:"chunk", id, seq, last, data}` に分割 (background.js が再結合)。
 
 ## 開発

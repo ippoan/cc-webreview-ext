@@ -89,6 +89,7 @@ jobs:
           mkdir -p target/release/extension
           cp ../extension/manifest.json ../extension/background.js \
              ../extension/sidepanel.html ../extension/sidepanel.js \
+             ../extension/xterm.js ../extension/xterm.css ../extension/addon-fit.js \
              target/release/extension/
           # manifest version を tag 由来の版に stamp する (side panel の版表示 /
           # 将来の拡張自動更新比較を機能させる)。
