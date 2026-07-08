@@ -103,6 +103,8 @@ fn run_native_host() {
     let writer = Arc::new(SharedWriter::new(io::stdout()));
     let log = Arc::new(DebugLog::open_default());
     let version = env!("CARGO_PKG_VERSION");
+    // release tag (agent-dev-N / agent-vX.Y.Z)。ローカルビルドでは None。
+    let release_tag = option_env!("CC_WEBREVIEW_RELEASE_TAG");
 
     // host → 拡張への送信は必ずここを通す (debug.sqlite に記録してから送る)。
     let emit = |v: serde_json::Value| {
@@ -122,6 +124,7 @@ fn run_native_host() {
     emit(json!({
         "type": "hello",
         "version": version,
+        "release_tag": release_tag,
         "claude": claude.as_ref().map(|p| p.display().to_string()),
     }));
 
@@ -152,6 +155,7 @@ fn run_native_host() {
                 emit(json!({
                     "type": "pong",
                     "version": version,
+                    "release_tag": release_tag,
                     "claude": claude.as_ref().map(|p| p.display().to_string()),
                     "running": active.as_mut().map(Session::is_running).unwrap_or(false),
                 }));
