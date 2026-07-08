@@ -38,6 +38,57 @@ document.getElementById('checkUpdate').addEventListener('click', () => {
   setStatus('更新確認中…');
 });
 
+// --- terminal 埋め込み (#18) -------------------------------------------
+// 対話モードの claude を PTY (host 側 ConPTY) で動かし、xterm.js に生バイトを流す。
+// -p と違い権限承認プロンプトに応答できる。
+
+const termContainer = document.getElementById('term');
+const termKillBtn = document.getElementById('termKill');
+let term = null;
+let fitAddon = null;
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function ensureTerm() {
+  termContainer.hidden = false;
+  termKillBtn.hidden = false;
+  if (term) return term;
+  term = new Terminal({ fontSize: 12, cursorBlink: true });
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(termContainer);
+  fitAddon.fit();
+  term.onData((d) => port.postMessage({ cmd: 'term_input', data: d }));
+  // panel 幅の変化に追従して PTY もリサイズする。
+  new ResizeObserver(() => {
+    if (!fitAddon) return;
+    fitAddon.fit();
+    port.postMessage({ cmd: 'term_resize', cols: term.cols, rows: term.rows });
+  }).observe(termContainer);
+  return term;
+}
+
+document.getElementById('termStart').addEventListener('click', () => {
+  const t = ensureTerm();
+  t.reset();
+  const extraArgs = extraArgsEl.value.trim() ? extraArgsEl.value.trim().split(/\s+/) : [];
+  port.postMessage({
+    cmd: 'term_start',
+    cols: t.cols,
+    rows: t.rows,
+    chrome: chromeEl.checked,
+    extra_args: extraArgs,
+  });
+  setStatus('terminal 起動中…');
+  t.focus();
+});
+termKillBtn.addEventListener('click', () => port.postMessage({ cmd: 'term_kill' }));
+
 function setStatus(text) {
   statusEl.textContent = text;
 }
@@ -224,8 +275,17 @@ function render(msg) {
       setStatus('更新確認完了');
       break;
     }
+    case 'term_out':
+      // replay で panel 再オープン時にも描き直せるよう、受信側でも ensure する。
+      ensureTerm().write(b64ToBytes(msg.data || ''));
+      break;
+    case 'term_exit':
+      setStatus(`terminal 終了 (code=${msg.code})`);
+      add('ev-proc', `terminal 終了 (code=${msg.code})`);
+      termKillBtn.hidden = true;
+      break;
     case 'busy':
-      setStatus('busy: 既にセッションが走っています');
+      setStatus('busy: 既にセッションが走っています (-p / terminal は同時 1 本)');
       break;
     case 'error':
       add('ev-error', `error: ${msg.error}`);

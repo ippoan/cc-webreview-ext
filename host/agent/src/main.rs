@@ -14,6 +14,7 @@ mod debuglog;
 mod nmhost;
 mod register;
 mod session;
+mod term;
 mod update;
 
 use debuglog::DebugLog;
@@ -138,6 +139,7 @@ fn run_native_host() {
     spawn_update_check(&writer, &log, false);
 
     let mut active: Option<Session> = None;
+    let mut active_term: Option<term::TermSession> = None;
 
     loop {
         let req = match nmhost::read_message(&mut r) {
@@ -157,6 +159,18 @@ fn run_native_host() {
                 active = None;
             }
         }
+        // terminal の exit は reader スレッドが {type:"term_exit"} を通知済みなので回収のみ。
+        if let Some(t) = active_term.as_mut() {
+            if !t.is_running() {
+                active_term = None;
+            }
+        }
+        // 「同時 claude 1 本」規約: -p / terminal どちらかが走っていれば busy。
+        let busy = active.as_mut().map(Session::is_running).unwrap_or(false)
+            || active_term
+                .as_mut()
+                .map(term::TermSession::is_running)
+                .unwrap_or(false);
 
         match session::parse_command(&req) {
             HostCommand::Ping => {
@@ -172,7 +186,7 @@ fn run_native_host() {
                 }));
             }
             HostCommand::Start(start) => {
-                if active.as_mut().map(Session::is_running).unwrap_or(false) {
+                if busy {
                     emit(json!({ "type": "busy" }));
                     continue;
                 }
@@ -202,6 +216,50 @@ fn run_native_host() {
                 // {type:"update_status"} で全件返す (最新でもフィードバックを出す)。
                 spawn_update_check(&writer, &log, true);
             }
+            HostCommand::TermStart(start) => {
+                if busy {
+                    emit(json!({ "type": "busy" }));
+                    continue;
+                }
+                let Some(claude) = register::resolve_claude_path() else {
+                    emit(json!({
+                        "type": "error",
+                        "error": "claude が見つからない。--register --claude-path <abs> で設定してください",
+                    }));
+                    continue;
+                };
+                match term::spawn_terminal(&claude, &start, &writer, &log) {
+                    Ok(t) => {
+                        emit(json!({ "type": "proc", "event": "term_spawn" }));
+                        active_term = Some(t);
+                    }
+                    Err(e) => {
+                        emit(json!({ "type": "error", "error": e }));
+                    }
+                }
+            }
+            HostCommand::TermInput(data) => {
+                if let Some(t) = active_term.as_mut() {
+                    if let Err(e) = t.write_input(&data) {
+                        emit(json!({ "type": "error", "error": e }));
+                    }
+                } else {
+                    emit(json!({ "type": "error", "error": "terminal が起動していない" }));
+                }
+            }
+            HostCommand::TermResize { cols, rows } => {
+                if let Some(t) = active_term.as_ref() {
+                    t.resize(cols, rows);
+                }
+            }
+            HostCommand::TermKill => {
+                if let Some(mut t) = active_term.take() {
+                    t.kill();
+                    emit(json!({ "type": "proc", "event": "term_killed" }));
+                } else {
+                    emit(json!({ "type": "proc", "event": "not_running" }));
+                }
+            }
             HostCommand::Stop => {
                 if let Some(mut s) = active.take() {
                     s.kill();
@@ -225,6 +283,11 @@ fn run_native_host() {
         eprintln!("[cc-webreview-agent] port 切断 → claude を kill");
         log.note("kill_on_eof", "claude killed");
         s.kill();
+    }
+    if let Some(mut t) = active_term.take() {
+        eprintln!("[cc-webreview-agent] port 切断 → terminal claude を kill");
+        log.note("kill_on_eof", "terminal killed");
+        t.kill();
     }
 }
 

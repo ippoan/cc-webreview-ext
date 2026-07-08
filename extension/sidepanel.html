@@ -2,11 +2,13 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
+  <link rel="stylesheet" href="xterm.css">
   <style>
     body { font-family: system-ui, sans-serif; font-size: 13px; margin: 8px; }
     #status { color: #555; margin-bottom: 6px; min-height: 1.2em; }
     #prompt { width: 100%; box-sizing: border-box; height: 72px; }
     #extraArgs { width: 100%; box-sizing: border-box; margin-top: 4px; font-family: monospace; font-size: 12px; }
+    #term { height: 60vh; min-height: 240px; margin-top: 6px; border: 1px solid #444; background: #000; }
     .row { display: flex; gap: 6px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
     button { cursor: pointer; }
     #timeline { border-top: 1px solid #ddd; margin-top: 8px; padding-top: 8px; }
@@ -45,8 +47,13 @@
     <button id="stop">Stop</button>
     <button id="ping">Ping</button>
     <button id="checkUpdate">更新確認</button>
+    <button id="termStart" title="対話モードの claude を PTY 起動 (権限承認に応答できる)">Terminal</button>
+    <button id="termKill" hidden>Term 終了</button>
   </div>
+  <div id="term" hidden></div>
   <div id="timeline"></div>
+  <script src="xterm.js"></script>
+  <script src="addon-fit.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

@@ -23,6 +23,11 @@ url = "2"
 # 検証専用の軽量 crate (署名生成は CI 側の minisign が担う)。
 minisign-verify = "0.2"
 
+# terminal 埋め込み (#18): 対話モード claude を PTY (Windows: ConPTY) 配下で spawn。
+portable-pty = "0.8"
+# PTY 出力の base64 中継 (チャンクが UTF-8 多バイト文字を分断するため生 JSON 不可)。
+base64 = "0.22"
+
 # HKCU NativeMessagingHosts / claude path の registry 読み書き。Windows のみ。
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
