@@ -93,19 +93,33 @@ pub fn pick_newer(current: Option<&str>, releases: &Value) -> Option<Candidate> 
     best.map(|(_, c)| c)
 }
 
-/// release の assets から Windows msvc zip の browser_download_url を拾う。
-fn pick_windows_asset(release: &Value) -> Option<String> {
+/// release の assets から条件 `pick` に合う zip を探し、**同じ release に detached
+/// 署名 `<name>.minisig` が添付されている場合のみ** browser_download_url を返す。
+/// 署名導入前の古い release は選択段階で飛ばす — DL してから .minisig 404 で落とす
+/// より診断が明確で、余計な DL も発生しない (実害: agent-dev-8 掴みで 404)。
+fn signed_asset_url(release: &Value, pick: impl Fn(&str) -> bool) -> Option<String> {
     let assets = release.get("assets")?.as_array()?;
-    for a in assets {
+    let (name, url) = assets.iter().find_map(|a| {
         let name = a.get("name").and_then(Value::as_str).unwrap_or("");
-        if name.contains(WIN_ASSET_MARK) && name.ends_with(".zip") {
-            return a
-                .get("browser_download_url")
-                .and_then(Value::as_str)
-                .map(|s| s.to_string());
+        if !pick(name) {
+            return None;
         }
-    }
-    None
+        a.get("browser_download_url")
+            .and_then(Value::as_str)
+            .map(|u| (name.to_string(), u.to_string()))
+    })?;
+    let sig_name = format!("{name}.minisig");
+    let has_sig = assets
+        .iter()
+        .any(|a| a.get("name").and_then(Value::as_str) == Some(sig_name.as_str()));
+    has_sig.then_some(url)
+}
+
+/// release の assets から Windows msvc zip (署名付き) の browser_download_url を拾う。
+fn pick_windows_asset(release: &Value) -> Option<String> {
+    signed_asset_url(release, |name| {
+        name.contains(WIN_ASSET_MARK) && name.ends_with(".zip")
+    })
 }
 
 /// asset URL を https + host allowlist で検証する (SSRF / 偽 host への置換を防ぐ)。
@@ -263,28 +277,27 @@ fn download_asset(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
 /// 拡張 zip asset の名前 prefix (release.yml が `cc-webreview-extension-<tag>.zip` で出す)。
 const EXT_ASSET_PREFIX: &str = "cc-webreview-extension-";
 
-/// releases から最新の拡張 zip asset を選ぶ (releases は新しい順なので最初の一致)。
+/// releases から最新 (dev-N 最大) の署名付き拡張 zip asset を選ぶ。
+///
+/// **API の配列順に依存しない。** GitHub の /releases はタグ名の逆辞書順で返ることが
+/// あり (実測: agent-dev-8 が agent-dev-19 より先頭)、「先頭 = 最新」の仮定は壊れる。
+/// agent 本体の pick_newer と同じく dev counter の最大値で選ぶ (= dev-N tag のみ対象)。
 pub fn pick_latest_extension(releases: &Value) -> Option<(String, String)> {
-    for rel in releases.as_array()? {
-        let tag = rel
-            .get("tag_name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let assets = match rel.get("assets").and_then(Value::as_array) {
-            Some(a) => a,
-            None => continue,
+    let arr = releases.as_array()?;
+    let mut best: Option<(u64, String, String)> = None;
+    for rel in arr {
+        let tag = rel.get("tag_name").and_then(Value::as_str).unwrap_or("");
+        let Some(n) = dev_counter(tag) else { continue };
+        let Some(url) = signed_asset_url(rel, |name| {
+            name.starts_with(EXT_ASSET_PREFIX) && name.ends_with(".zip")
+        }) else {
+            continue;
         };
-        for a in assets {
-            let name = a.get("name").and_then(Value::as_str).unwrap_or("");
-            if name.starts_with(EXT_ASSET_PREFIX) && name.ends_with(".zip") {
-                if let Some(url) = a.get("browser_download_url").and_then(Value::as_str) {
-                    return Some((tag, url.to_string()));
-                }
-            }
+        if best.as_ref().map(|(bn, _, _)| n > *bn).unwrap_or(true) {
+            best = Some((n, tag.to_string(), url));
         }
     }
-    None
+    best.map(|(_, tag, url)| (tag, url))
 }
 
 /// install dir の extension\ を最新拡張 zip で更新する。前回 tag は .ext-version に記録。
@@ -355,15 +368,30 @@ mod tests {
         assert_eq!(dev_counter("agent-dev-x"), None);
     }
 
+    /// asset + その `.minisig` を添付した release fixture (署名付きが正常形)。
     fn rel(tag: &str, asset: Option<&str>) -> Value {
         let assets = match asset {
-            Some(name) => json!([{
-                "name": name,
-                "browser_download_url": format!("https://example.com/{name}")
-            }]),
+            Some(name) => json!([
+                {
+                    "name": name,
+                    "browser_download_url": format!("https://example.com/{name}")
+                },
+                {
+                    "name": format!("{name}.minisig"),
+                    "browser_download_url": format!("https://example.com/{name}.minisig")
+                }
+            ]),
             None => json!([]),
         };
         json!({ "tag_name": tag, "assets": assets })
+    }
+
+    /// `.minisig` の無い (署名導入前の) release fixture。
+    fn rel_unsigned(tag: &str, asset: &str) -> Value {
+        json!({ "tag_name": tag, "assets": [{
+            "name": asset,
+            "browser_download_url": format!("https://example.com/{asset}")
+        }]})
     }
 
     #[test]
@@ -452,31 +480,34 @@ mod tests {
     }
 
     #[test]
-    fn pick_latest_extension_finds_first_extension_zip() {
+    fn pick_latest_extension_ignores_api_order_and_unsigned() {
+        // GitHub /releases はタグ名の逆辞書順で返ることがある (実測: dev-8 が dev-19
+        // より先頭)。配列順に依存せず dev-N 最大の**署名付き** release を選ぶこと。
         let releases = json!([
-            // 新しい順。最初に拡張 zip を持つ release を採用。
-            { "tag_name": "agent-dev-9", "assets": [
-                { "name": "cc-webreview-agent-0.0.9-x86_64.msi", "browser_download_url": "u-msi" }
-            ]},
-            { "tag_name": "agent-dev-8", "assets": [
-                { "name": "cc-webreview-extension-agent-dev-8.zip", "browser_download_url": "u-ext2" },
-                { "name": "cc-webreview-extension-agent-dev-8.zip.sha256", "browser_download_url": "u-sha" }
-            ]},
-            { "tag_name": "agent-dev-7", "assets": [
-                { "name": "cc-webreview-extension-agent-dev-7.zip", "browser_download_url": "u-ext1" }
-            ]},
+            // 先頭 = 署名なしの古い dev-8 (実害を再現) → 選ばない
+            rel_unsigned("agent-dev-8", "cc-webreview-extension-agent-dev-8.zip"),
+            rel(
+                "agent-dev-17",
+                Some("cc-webreview-extension-agent-dev-17.zip")
+            ),
+            rel(
+                "agent-dev-19",
+                Some("cc-webreview-extension-agent-dev-19.zip")
+            ),
         ]);
         let (tag, url) = pick_latest_extension(&releases).unwrap();
-        assert_eq!(tag, "agent-dev-8");
-        assert_eq!(url, "u-ext2");
+        assert_eq!(tag, "agent-dev-19");
+        assert!(url.ends_with("cc-webreview-extension-agent-dev-19.zip"));
     }
 
     #[test]
-    fn pick_latest_extension_none_when_no_extension_asset() {
+    fn pick_latest_extension_none_when_no_signed_extension_asset() {
         let releases = json!([
             { "tag_name": "agent-dev-9", "assets": [
                 { "name": "cc-webreview-agent-0.0.9-x86_64.msi", "browser_download_url": "u" }
-            ]}
+            ]},
+            // 拡張 zip はあるが署名なし → 対象外
+            rel_unsigned("agent-dev-8", "cc-webreview-extension-agent-dev-8.zip"),
         ]);
         assert!(pick_latest_extension(&releases).is_none());
     }
@@ -535,13 +566,39 @@ R8AVSQq5/+oA2bMF8/pxJPlmZEknex10VYCLhuG28QGS6njYk7Swv3CP6IetVdDHPwcRhRDKgFV+GsIu
     }
 
     #[test]
-    fn pick_windows_asset_prefers_zip_msvc() {
+    fn pick_windows_asset_prefers_zip_msvc_and_requires_minisig() {
         let r = json!({
             "assets": [
                 { "name": "cc-webreview-agent-dev-7-x86_64-unknown-linux-gnu.tar.gz", "browser_download_url": "u1" },
-                { "name": "cc-webreview-agent-dev-7-x86_64-pc-windows-msvc.zip", "browser_download_url": "u2" }
+                { "name": "cc-webreview-agent-dev-7-x86_64-pc-windows-msvc.zip", "browser_download_url": "u2" },
+                { "name": "cc-webreview-agent-dev-7-x86_64-pc-windows-msvc.zip.minisig", "browser_download_url": "u2-sig" }
             ]
         });
         assert_eq!(pick_windows_asset(&r).as_deref(), Some("u2"));
+
+        // .minisig が無い release は掴まない (署名導入前の古い release を除外)。
+        let unsigned = json!({
+            "assets": [
+                { "name": "cc-webreview-agent-dev-7-x86_64-pc-windows-msvc.zip", "browser_download_url": "u2" }
+            ]
+        });
+        assert!(pick_windows_asset(&unsigned).is_none());
+    }
+
+    #[test]
+    fn pick_newer_skips_unsigned_release() {
+        // 新しい dev-9 が署名なしなら、署名付きの dev-8 に落とす (掴んで 404 しない)。
+        let releases = json!([
+            rel_unsigned(
+                "agent-dev-9",
+                "cc-webreview-agent-agent-dev-9-x86_64-pc-windows-msvc.zip"
+            ),
+            rel(
+                "agent-dev-8",
+                Some("cc-webreview-agent-agent-dev-8-x86_64-pc-windows-msvc.zip")
+            ),
+        ]);
+        let c = pick_newer(Some("agent-dev-7"), &releases).unwrap();
+        assert_eq!(c.tag, "agent-dev-8");
     }
 }

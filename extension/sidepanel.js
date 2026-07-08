@@ -122,6 +122,9 @@ const termContainer = document.getElementById('term');
 const termKillBtn = document.getElementById('termKill');
 let term = null;
 let fitAddon = null;
+// terminal session が host 側で走っているか。終了後の keystroke を host に送って
+// error を量産しない (実機で「terminal が起動していない」が連発した対策)。
+let termRunning = false;
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -139,10 +142,12 @@ function ensureTerm() {
   term.loadAddon(fitAddon);
   term.open(termContainer);
   fitAddon.fit();
-  term.onData((d) => port.postMessage({ cmd: 'term_input', data: d }));
+  term.onData((d) => {
+    if (termRunning) port.postMessage({ cmd: 'term_input', data: d });
+  });
   // panel 幅の変化に追従して PTY もリサイズする。
   new ResizeObserver(() => {
-    if (!fitAddon) return;
+    if (!fitAddon || !termRunning) return;
     fitAddon.fit();
     port.postMessage({ cmd: 'term_resize', cols: term.cols, rows: term.rows });
   }).observe(termContainer);
@@ -323,6 +328,8 @@ function render(msg) {
       if (msg.event === 'exit') {
         setStatus(`claude 終了 (code=${msg.code}) session_id=${msg.session_id || '?'}`);
       }
+      if (msg.event === 'term_spawn') termRunning = true;
+      if (msg.event === 'term_killed') termRunning = false;
       add('ev-proc', `proc: ${msg.event}${msg.code != null ? ` code=${msg.code}` : ''}`);
       break;
     case 'update':
@@ -356,6 +363,7 @@ function render(msg) {
       ensureTerm().write(b64ToBytes(msg.data || ''));
       break;
     case 'term_exit':
+      termRunning = false;
       setStatus(`terminal 終了 (code=${msg.code})`);
       add('ev-proc', `terminal 終了 (code=${msg.code})`);
       termKillBtn.hidden = true;
