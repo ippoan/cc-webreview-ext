@@ -1,0 +1,17 @@
+[package]
+name = "cc-webreview-agent"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "cc-webreview native messaging host — 拡張から claude.exe を spawn し stream-json を中継する"
+
+[dependencies]
+serde_json = "1"
+# debug ログ (%LOCALAPPDATA%\cc-webreview\debug.sqlite)。bundled で SQLite を静的リンク
+# (Windows / CCoW どちらも外部 DLL 不要)。
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# HKCU NativeMessagingHosts / claude path の registry 読み書き。Windows のみ。
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
