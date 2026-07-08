@@ -68,6 +68,7 @@ cargo build --release
 |---|---|
 | `Specified native messaging host not found` | `--register` をやり直す。拡張 ID が固定 ID と一致しているか確認 |
 | `claude が見つからない` | `--register --claude-path <絶対パス>` で再設定 (PATH は見ない仕様) |
+| `401 Invalid authentication credentials` / `Not logged in` | まず claude を最新化 (旧版は未ログインでも 401 を出す)。`/login` が通らない場合は `claude setup-token` → `setx CLAUDE_CODE_OAUTH_TOKEN "<token>"` → `taskkill /IM chrome.exe /F` → Chrome 起動し直し (詳細: [docs/spike-claude-chrome.md](./docs/spike-claude-chrome.md)、経緯: #11) |
 | 何が起きたか分からない | `cc-webreview-agent.exe --debug-dump 200` — host を通った全イベント (制御 msg / stream-json / stderr / proc) が `%LOCALAPPDATA%\cc-webreview\debug.sqlite` に残っている。sqlite3 で直接 `SELECT * FROM events` も可 |
 | busy と言われる | 既に claude セッションが走っている。`Stop` してから再実行 |
 
