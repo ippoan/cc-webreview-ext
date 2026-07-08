@@ -252,6 +252,16 @@ fn run_native_host() {
                     t.resize(cols, rows);
                 }
             }
+            HostCommand::DebugDump(limit) => {
+                // side panel の「debug コピー」。dump 自体は debug.sqlite の read のみ。
+                // 大きくても SharedWriter が chunk 分割する。
+                match log.dump(limit) {
+                    Ok(lines) => emit(json!({ "type": "debug_dump", "lines": lines })),
+                    Err(e) => {
+                        emit(json!({ "type": "error", "error": format!("debug dump 失敗: {e}") }))
+                    }
+                }
+            }
             HostCommand::TermKill => {
                 if let Some(mut t) = active_term.take() {
                     t.kill();

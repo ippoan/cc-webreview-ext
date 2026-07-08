@@ -31,11 +31,15 @@ Claude in Chrome 拡張 v1.0.36+ も。
    (manifest の `key` で固定済み。違う ID になったら manifest が壊れている)。
 
 3. **claude.exe のパス設定 (必要な場合のみ)**: `%USERPROFILE%\.local\bin\claude.exe`
-   に居るなら不要。それ以外の場所なら一度だけ:
+   に居るなら不要。それ以外の場所なら一度だけ (実パスを自動解決してそのまま登録):
 
    ```powershell
-   & "$env:LOCALAPPDATA\Programs\cc-webreview-agent\cc-webreview-agent.exe" --register --claude-path "C:\path\to\claude.exe"
+   $claude = (Get-Command claude.exe -ErrorAction Stop).Source
+   & "$env:LOCALAPPDATA\Programs\cc-webreview-agent\cc-webreview-agent.exe" --register --claude-path $claude
    ```
+
+   実在しないパスを渡すと登録は失敗する (プレースホルダのコピペ事故防止)。
+   `Get-Command` で見つからない場合は `where.exe claude` で場所を探す。
 
 4. **動作確認**: ツールバーの cc-webreview アイコン → side panel が開く →
    `Ping` で `host vX.Y.Z 接続 / claude: <path>` が出れば host 接続 OK →
@@ -99,10 +103,10 @@ cargo build --release
 
 ## プロトコル (拡張 ↔ host)
 
-- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}` / `{cmd:"term_start", cols, rows, chrome?, extra_args?, cwd?}` / `{cmd:"term_input", data}` / `{cmd:"term_resize", cols, rows}` / `{cmd:"term_kill"}`
+- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}` / `{cmd:"term_start", cols, rows, chrome?, extra_args?, cwd?}` / `{cmd:"term_input", data}` / `{cmd:"term_resize", cols, rows}` / `{cmd:"term_kill"}` / `{cmd:"debug_dump", limit?}`
 - **prompt は claude の stdin に渡す** (argv 渡しは改行入り prompt が `cmd /C` で分断され、
   `-` 始まりの行が `unknown option` になるため禁止)
-- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"|"term_out"|"term_exit"}`。
+- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"|"term_out"|"term_exit"|"debug_dump"}`。
   `term_out.data` は base64 (PTY チャンクは UTF-8 多バイト文字を分断し得るため)。
   512KB 超は `{type:"chunk", id, seq, last, data}` に分割 (background.js が再結合)。
 

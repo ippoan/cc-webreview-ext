@@ -41,6 +41,14 @@ pub fn validate_claude_path(p: &str) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err(format!("claude パスは絶対パスで指定してください: {p}"));
     }
+    // 実在しないパスは reject する — README の例文プレースホルダ
+    // (`C:\path\to\claude.exe`) がそのまま登録され resolve が壊れた実害があるため、
+    // 登録時点で loud fail させる。
+    if !path.is_file() {
+        return Err(format!(
+            "claude が {p} に存在しません。`where.exe claude` で実パスを確認してから --register し直してください"
+        ));
+    }
     Ok(path)
 }
 
@@ -168,12 +176,23 @@ mod tests {
     }
 
     #[test]
-    fn validate_claude_path_requires_absolute() {
+    fn validate_claude_path_requires_absolute_and_existing() {
+        // 相対パスは reject。
         assert!(validate_claude_path("claude.exe").is_err());
         assert!(validate_claude_path("bin/claude").is_err());
+
+        // 絶対パスでも実在しなければ reject (README のプレースホルダ登録事故の再発防止)。
         #[cfg(windows)]
-        assert!(validate_claude_path(r"C:\Users\me\.local\bin\claude.exe").is_ok());
+        assert!(validate_claude_path(r"C:\path\to\claude.exe").is_err());
         #[cfg(not(windows))]
-        assert!(validate_claude_path("/usr/local/bin/claude").is_ok());
+        assert!(validate_claude_path("/path/to/claude").is_err());
+
+        // 実在する絶対パスは OK (tempfile で固定)。
+        let dir = std::env::temp_dir().join(format!("ccwr-reg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("claude.exe");
+        std::fs::write(&exe, b"stub").unwrap();
+        assert!(validate_claude_path(&exe.to_string_lossy()).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -37,6 +37,18 @@ document.getElementById('checkUpdate').addEventListener('click', () => {
   port.postMessage({ cmd: 'check_update' });
   setStatus('更新確認中…');
 });
+document.getElementById('debugCopy').addEventListener('click', () => {
+  port.postMessage({ cmd: 'debug_dump', limit: 50 });
+  setStatus('debug ログ取得中…');
+});
+document.getElementById('clearLog').addEventListener('click', () => {
+  // 表示と SW の replay バッファの両方を消す (バッファを残すと panel 再オープンで
+  // 全部戻ってくる)。host 側の debug.sqlite はそのまま (debug コピーで参照可能)。
+  timeline.textContent = '';
+  lastAssistantText = '';
+  port.postMessage({ cmd: 'clear_log' });
+  setStatus('log をクリアしました');
+});
 
 // --- draft PR 一覧 (#4, API: ippoan/ci-dashboard#470) --------------------
 // ci-dashboard の webhook-fed 一覧を CF Access cookie 相乗りで fetch する。
@@ -356,6 +368,18 @@ function render(msg) {
               : `${who} の更新確認に失敗: ${msg.error || '?'}`;
       add(msg.status === 'error' ? 'ev-error' : 'ev-proc', text);
       setStatus('更新確認完了');
+      break;
+    }
+    case 'debug_dump': {
+      // 「debug コピー」の応答。クリップバードへ + 手動選択用に折りたたみでも出す
+      // (clipboard が拒否された場合のフォールバック)。
+      const lines = msg.lines || [];
+      const text = lines.join('\n');
+      addCollapsed(`debug dump (${lines.length} 件)`, text.slice(0, 8000));
+      navigator.clipboard
+        .writeText(text)
+        .then(() => setStatus(`debug ログ ${lines.length} 件をコピーしました — そのまま貼り付けてください`))
+        .catch((e) => setStatus(`クリップボード書き込み失敗 (${e}) — 下の折りたたみから手動でコピーしてください`));
       break;
     }
     case 'term_out':

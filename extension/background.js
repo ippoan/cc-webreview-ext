@@ -71,6 +71,11 @@ chrome.runtime.onConnect.addListener((port) => {
       for (const e of eventBuffer) port.postMessage(e);
       return;
     }
+    // panel の「log クリア」。replay バッファを空にする (host へは送らない)。
+    if (msg.cmd === 'clear_log') {
+      eventBuffer.length = 0;
+      return;
+    }
     // start / stop / ping は host へそのまま中継。
     try {
       ensureNative().postMessage(msg);
