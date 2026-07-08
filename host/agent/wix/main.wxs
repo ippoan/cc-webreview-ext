@@ -1,0 +1,131 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!--
+  SOURCE-MIRROR: ippoan/cdp-relay:rust/agent/wix/main.wxs
+  cc-webreview-agent の WiX 定義 (cc-webreview-ext#6)。cargo-wix (WiX v3 toolset) でビルドする。
+
+  **perUser install**: %LOCALAPPDATA%\Programs\cc-webreview-agent\ に入れる。
+  install / native-host 登録とも admin 不要 (UAC 無し)。将来の self-update
+  (self_replace) も user 領域なら効く。
+
+  git clone 不要の配布が目的: MSI に MV3 拡張も同梱し、chrome://extensions の
+  「パッケージ化されていない拡張機能を読み込む」で
+  %LOCALAPPDATA%\Programs\cc-webreview-agent\extension を選ぶだけで使える。
+
+  perUser では user-profile 配下の component は HKCU registry を KeyPath にする必要が
+  ある (ICE38)。各 component に Software\ippoan\cc-webreview 配下の dummy 値を keypath
+  として持たせ、File は keypath にしない。extension は CI が
+  CargoTargetBinDir\extension に配置してから wix を回す。
+
+  **UpgradeCode (EE3BD186-...) は変更禁止** — 変えるとバージョンアップ時に別製品として
+  扱われ MajorUpgrade が効かなくなる。
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+  <?define Manufacturer = 'ippoan' ?>
+  <?define ProductName = 'cc-webreview agent' ?>
+  <?define UpgradeCode = 'EE3BD186-4A65-4A47-8454-E95EBDDD0D2E' ?>
+
+  <Product
+    Id='*'
+    Name='$(var.ProductName)'
+    UpgradeCode='$(var.UpgradeCode)'
+    Manufacturer='$(var.Manufacturer)'
+    Language='1033'
+    Codepage='1252'
+    Version='$(var.Version)'>
+
+    <Package
+      InstallerVersion='450'
+      Compressed='yes'
+      InstallScope='perUser'
+      Description='cc-webreview agent - native messaging host to run claude reviews from a Chrome side panel'
+      Manufacturer='$(var.Manufacturer)' />
+
+    <MajorUpgrade
+      Schedule='afterInstallInitialize'
+      DowngradeErrorMessage='A newer version of [ProductName] is already installed.' />
+
+    <MediaTemplate EmbedCab='yes' />
+
+    <Directory Id='TARGETDIR' Name='SourceDir'>
+      <!-- %LOCALAPPDATA%\Programs\cc-webreview-agent\ (user 領域、admin 不要) -->
+      <Directory Id='LocalAppDataFolder'>
+        <Directory Id='ProgramsFolder' Name='Programs'>
+          <Directory Id='APPLICATIONFOLDER' Name='cc-webreview-agent'>
+            <!-- MV3 拡張を同梱する。chrome://extensions で「パッケージ化されていない
+                 拡張機能を読み込む」で APPLICATIONFOLDER\extension を選ぶ。 -->
+            <Directory Id='ExtensionFolder' Name='extension' />
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id='APPLICATIONFOLDER'>
+      <!-- agent 本体。perUser なので KeyPath は HKCU registry にする (ICE38)。 -->
+      <Component Id='AgentExeComp' Guid='9A2AE82B-A2C1-4AB5-BD0B-47EA897058C9' Win64='yes'>
+        <File
+          Id='AgentExe'
+          Name='cc-webreview-agent.exe'
+          DiskId='1'
+          Source='$(var.CargoTargetBinDir)\cc-webreview-agent.exe' />
+        <!-- user-profile 配下の dir は uninstall 時の削除エントリが必須 (ICE64)。
+             APPLICATIONFOLDER と親 ProgramsFolder を片付ける (空なら削除)。
+             ExtensionFolder は ExtensionComp 側で removal 済み。 -->
+        <RemoveFolder Id='RemoveApplicationFolder' On='uninstall' />
+        <RemoveFolder Id='RemoveProgramsFolder' Directory='ProgramsFolder' On='uninstall' />
+        <RegistryValue Root='HKCU' Key='Software\ippoan\cc-webreview'
+          Name='exe' Type='integer' Value='1' KeyPath='yes' />
+      </Component>
+    </DirectoryRef>
+
+    <!-- 拡張ファイルを extension\ に同梱 (CI が CargoTargetBinDir\extension に配置) -->
+    <DirectoryRef Id='ExtensionFolder'>
+      <Component Id='ExtensionComp' Guid='1DE49478-DFCA-4413-82C2-992D0270C48E' Win64='yes'>
+        <File Id='ExtManifest' Name='manifest.json'
+          Source='$(var.CargoTargetBinDir)\extension\manifest.json' />
+        <File Id='ExtBackground' Name='background.js'
+          Source='$(var.CargoTargetBinDir)\extension\background.js' />
+        <File Id='ExtSidepanelHtml' Name='sidepanel.html'
+          Source='$(var.CargoTargetBinDir)\extension\sidepanel.html' />
+        <File Id='ExtSidepanelJs' Name='sidepanel.js'
+          Source='$(var.CargoTargetBinDir)\extension\sidepanel.js' />
+        <RemoveFolder Id='RemoveExtensionFolder' On='uninstall' />
+        <RegistryValue Root='HKCU' Key='Software\ippoan\cc-webreview'
+          Name='extension' Type='integer' Value='1' KeyPath='yes' />
+      </Component>
+    </DirectoryRef>
+
+    <Feature
+      Id='MainFeature'
+      Title='cc-webreview agent'
+      Description='cc-webreview-agent and bundled MV3 extension'
+      Level='1'
+      ConfigurableDirectory='APPLICATIONFOLDER'
+      AllowAdvertise='no'
+      Display='expand'
+      Absent='disallow'>
+      <ComponentRef Id='AgentExeComp' />
+      <ComponentRef Id='ExtensionComp' />
+    </Feature>
+
+    <!--
+      インストール直後に、入れたばかりの exe で native-host manifest を**自身のパスに
+      登録**する。register フラグ (先頭ハイフン2つ) は HKCU registry + manifest を
+      書いて即 exit するので installer を block しない。manifest が旧 exe を指したまま
+      だと Chrome が旧 agent を起動し続ける悪循環 (cdp-relay で実害) を断ち切るため、
+      更新のたびに貼り替える。perUser install なので Impersonate='yes' で実ユーザーの
+      HKCU に書く。登録失敗は致命にしない (Return='ignore')。アンインストール時
+      (REMOVE) は走らせない。claude.exe のパス設定は含まれない: 既知の場所に無い場合
+      のみ、install 後に register + claude-path フラグを一度手で実行する (README 参照)。
+    -->
+    <CustomAction Id='RegisterNativeHost'
+      FileKey='AgentExe'
+      ExeCommand='--register'
+      Execute='deferred'
+      Impersonate='yes'
+      Return='ignore' />
+    <InstallExecuteSequence>
+      <Custom Action='RegisterNativeHost' After='InstallFiles'>NOT REMOVE</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

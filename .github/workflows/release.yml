@@ -1,0 +1,111 @@
+name: Release
+
+# SOURCE-MIRROR: ippoan/cdp-relay:.github/workflows/release-msi.yml
+# agent-dev-N / agent-vX.Y.Z の tag push で Windows MSI (cargo-wix) + 拡張 zip を
+# ビルドして GitHub Release に添付する (cc-webreview-ext#6)。
+# MSI は host exe + MV3 拡張を同梱し、install 時の custom action で native host を
+# HKCU 登録する — git clone 不要で「MSI 1 発 → 拡張フォルダを読み込む」だけにする。
+#
+# NOTE: MSI ビルドは CCoW で検証できず windows-latest + WiX toolset 依存。cargo-wix の
+# フラグや CargoTargetBinDir 解決は初回 CI で要調整 (cdp-relay と同じ注意書き)。
+
+on:
+  push:
+    tags:
+      - 'agent-v*'
+      - 'agent-dev-*'
+
+permissions:
+  contents: write
+
+jobs:
+  msi:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: host
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: host
+          shared-key: cc-webreview-release
+
+      - name: Build cc-webreview-agent (release)
+        env:
+          CC_WEBREVIEW_RELEASE_TAG: ${{ github.ref_name }}
+        run: cargo build --release --locked -p cc-webreview-agent
+
+      - name: Compute version (dev-N -> 0.0.N / vX.Y.Z -> X.Y.Z)
+        id: ver
+        shell: bash
+        env:
+          # run へ直接 ${{ }} 展開しない (tag 名は $() 等を含み得るため env 経由)。
+          TAG: ${{ github.ref_name }}
+        run: |
+          tag="$TAG"
+          if [[ "$tag" =~ ^agent-dev-([0-9]+)$ ]]; then
+            echo "version=0.0.${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          elif [[ "$tag" =~ ^agent-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bundle MV3 extension (manifest stamp + CargoTargetBinDir\extension に配置)
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/release/extension
+          cp ../extension/manifest.json ../extension/background.js \
+             ../extension/sidepanel.html ../extension/sidepanel.js \
+             target/release/extension/
+          # manifest version を tag 由来の版に stamp する (side panel の版表示 /
+          # 将来の拡張自動更新比較を機能させる)。
+          VER="$VER" node -e "const fs=require('fs');const p='target/release/extension/manifest.json';const m=JSON.parse(fs.readFileSync(p));m.version=process.env.VER;fs.writeFileSync(p,JSON.stringify(m,null,2)+'\n')"
+          echo "extension manifest version -> ${VER}"
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix
+
+      - name: Build MSI (no rebuild, reuse target/release)
+        run: >
+          cargo wix --package cc-webreview-agent --no-build --nocapture
+          --install-version ${{ steps.ver.outputs.version }}
+          --output target/wix/cc-webreview-agent-${{ steps.ver.outputs.version }}-x86_64.msi
+
+      - name: Package extension zip
+        # windows-latest に zip コマンドが無いので PowerShell の Compress-Archive を使う。
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $zip = "cc-webreview-extension-$env:TAG.zip"
+          # target/release/extension の中身を flat に固める (chrome unpacked 読込用)。
+          Compress-Archive -Path "target/release/extension/*" -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash" | Out-File -Encoding ascii "$zip.sha256"
+          $msi = Get-Item target/wix/*.msi
+          $mhash = (Get-FileHash $msi -Algorithm SHA256).Hash.ToLower()
+          "$mhash" | Out-File -Encoding ascii "$($msi.FullName).sha256"
+          Get-Item $zip
+
+      - name: Upload MSI + extension zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          # `-` を含む tag (agent-dev-N) は prerelease。揃えないと dev-* が
+          # 非 prerelease で作られ "Latest" を奪う (cdp-relay で実害)。
+          # stable tag (agent-vX.Y.Z) は非 prerelease のまま → Latest になる。
+          prerelease: ${{ contains(github.ref_name, '-dev-') }}
+          files: |
+            host/target/wix/*.msi
+            host/target/wix/*.msi.sha256
+            host/cc-webreview-extension-*.zip
+            host/cc-webreview-extension-*.zip.sha256
+          fail_on_unmatched_files: true

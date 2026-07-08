@@ -14,36 +14,52 @@ Side Panel ──▶ Service Worker ──connectNative──▶ cc-webreview-ag
 
 全体設計は [tracking issue #7](https://github.com/ippoan/cc-webreview-ext/issues/7)。
 
-## Windows セットアップ (検証手順)
+## Windows セットアップ (MSI、git clone 不要)
 
 前提: Windows ネイティブ claude.exe (v2.0.73+、WSL 不可)。`--chrome` を試す場合は
 Claude in Chrome 拡張 v1.0.36+ も。
 
-1. **ビルド**
-
-   ```powershell
-   git clone https://github.com/ippoan/cc-webreview-ext
-   cd cc-webreview-ext\host
-   cargo build --release
-   ```
+1. **MSI インストール**: [Releases](https://github.com/ippoan/cc-webreview-ext/releases)
+   から `cc-webreview-agent-*-x86_64.msi` を実行 (perUser install、admin 不要)。
+   host exe + 拡張が `%LOCALAPPDATA%\Programs\cc-webreview-agent\` に入り、
+   native host の HKCU 登録も install 時に自動で行われる。
 
 2. **拡張をロード**: `chrome://extensions` → デベロッパーモード ON →
-   「パッケージ化されていない拡張機能を読み込む」→ `extension/` フォルダを選択。
+   「パッケージ化されていない拡張機能を読み込む」→
+   `%LOCALAPPDATA%\Programs\cc-webreview-agent\extension` を選択。
    ID が `hkinllfgncahghgkimjjcdppgnglijcb` になることを確認
    (manifest の `key` で固定済み。違う ID になったら manifest が壊れている)。
 
-3. **native host 登録** (claude.exe の場所は `where claude` などで確認):
+3. **claude.exe のパス設定 (必要な場合のみ)**: `%USERPROFILE%\.local\bin\claude.exe`
+   に居るなら不要。それ以外の場所なら一度だけ:
 
    ```powershell
-   .\target\release\cc-webreview-agent.exe --register --claude-path "C:\Users\<you>\.local\bin\claude.exe"
+   & "$env:LOCALAPPDATA\Programs\cc-webreview-agent\cc-webreview-agent.exe" --register --claude-path "C:\path\to\claude.exe"
    ```
-
-   HKCU (Chrome / Edge) に登録されるので admin 不要。Chrome の再起動も原則不要。
 
 4. **動作確認**: ツールバーの cc-webreview アイコン → side panel が開く →
    `Ping` で `host vX.Y.Z 接続 / claude: <path>` が出れば host 接続 OK →
    prompt を入れて `Start`。claude の stream-json イベントがタイムラインに流れる。
    service worker の console (`chrome://extensions` → Service Worker「検証」) にも全イベントが出る。
+
+### リリースサイクル
+
+- `host/` / `extension/` が main に merge されると `dev-tag.yml` が `agent-dev-N` を
+  自動採番 → `release.yml` が MSI + 拡張 zip (`cc-webreview-extension-*.zip`) を
+  prerelease として添付する。stable は `agent-vX.Y.Z` tag (非 prerelease = Latest)。
+- 更新は新しい MSI を入れ直すだけ (MajorUpgrade で上書き、native host 登録も貼り替え)。
+  agent 内蔵 self-update / minisign 署名検証は未実装 (#6 の残タスク)。
+
+### ソースからビルドする場合 (開発者向け)
+
+```powershell
+git clone https://github.com/ippoan/cc-webreview-ext
+cd cc-webreview-ext\host
+cargo build --release
+.\target\release\cc-webreview-agent.exe --register --claude-path "C:\Users\<you>\.local\bin\claude.exe"
+```
+
+拡張はリポジトリの `extension/` を unpacked ロードする。
 
 ## トラブルシュート
 

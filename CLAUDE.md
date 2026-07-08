@@ -27,6 +27,7 @@ unit test する。registry 登録・実 claude spawn・拡張との接続の検
 - **同時 claude セッションは 1 本** (`busy` で拒否)。port 切断時は kill してゾンビを残さない。
 - 拡張 ID は manifest.json の `key` で固定 (`hkinllfgncahghgkimjjcdppgnglijcb`)。
   `key` を変えると native host の allowed_origins と不整合になる。
+- **`wix/main.wxs` の `UpgradeCode` は変更禁止** (別製品扱いになり MajorUpgrade が壊れる)。
 
 ## GitHub 自動化
 
