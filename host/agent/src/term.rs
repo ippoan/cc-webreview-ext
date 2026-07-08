@@ -212,7 +212,11 @@ fn command_builder_for(claude: &Path) -> CommandBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // terminal 実プロセステスト (unix のみ) 専用 import。Windows ビルドでは
+    // unused import になるため cfg で絞る。
+    #[cfg(unix)]
     use crate::nmhost::read_message;
+    #[cfg(unix)]
     use std::io::Cursor;
 
     #[test]
