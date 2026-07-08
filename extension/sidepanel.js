@@ -93,8 +93,20 @@ function renderPrList(prs, updatedAt) {
     author.textContent = pr.author;
     row.append(ref, title, author);
     row.addEventListener('click', () => {
-      promptEl.value = reviewPrompt(pr);
-      setStatus(`${pr.repo}#${pr.number} のレビューテンプレを prompt に入れました — Start で開始`);
+      const p = reviewPrompt(pr);
+      if (termRunning) {
+        // terminal 起動中は claude の入力欄へ直接流し込む。bracketed paste
+        // (ESC [200~ … ESC [201~) で包むと複数行でも submit されず 1 ブロックで
+        // 入る (claude は ?2004h を有効化済み)。送信の Enter は user が押す。
+        port.postMessage({ cmd: 'term_input', data: `\x1b[200~${p}\x1b[201~` });
+        if (term) term.focus();
+        setStatus(
+          `${pr.repo}#${pr.number} のレビュープロンプトを terminal に入力しました — Enter で送信`
+        );
+      } else {
+        promptEl.value = p;
+        setStatus(`${pr.repo}#${pr.number} のレビューテンプレを prompt に入れました — Start で開始`);
+      }
     });
     prListEl.appendChild(row);
   }
@@ -158,16 +170,29 @@ function ensureTerm() {
     if (termRunning) port.postMessage({ cmd: 'term_input', data: d });
   });
   // panel 幅の変化に追従して PTY もリサイズする。
+  // panel が畳まれた/隠れた瞬間に fit すると cols=2 等の極小値で PTY を潰して
+  // TUI が崩れる (実機 debug dump で term_resize cols=2 を観測)。まともなサイズの
+  // 時だけ追従し、極小値は host に送らない。
   new ResizeObserver(() => {
     if (!fitAddon || !termRunning) return;
+    if (termContainer.clientWidth < 160 || termContainer.clientHeight < 100) return;
     fitAddon.fit();
-    port.postMessage({ cmd: 'term_resize', cols: term.cols, rows: term.rows });
+    if (term.cols >= 20 && term.rows >= 5) {
+      port.postMessage({ cmd: 'term_resize', cols: term.cols, rows: term.rows });
+    }
   }).observe(termContainer);
   return term;
 }
 
 document.getElementById('termStart').addEventListener('click', () => {
   const t = ensureTerm();
+  // 起動中の再クリックは busy エラーにせずフォーカスだけ当てる (再起動したい時は
+  // Term 終了 → Terminal)。
+  if (termRunning) {
+    setStatus('terminal は起動中です — 再起動するには先に「Term 終了」');
+    t.focus();
+    return;
+  }
   t.reset();
   const extraArgs = extraArgsEl.value.trim() ? extraArgsEl.value.trim().split(/\s+/) : [];
   port.postMessage({
