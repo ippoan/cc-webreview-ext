@@ -134,37 +134,8 @@ fn run_native_host() {
 
     // 更新チェック (#6) はバックグラウンドで行い、stdio ループを塞がない。
     // agent 本体は self_replace され**次回起動で反映**、拡張は extension\ を上書きし
-    // Chrome の拡張リロードで反映される。適用時のみ {type:"update"} を side panel に通知。
-    {
-        let writer = Arc::clone(&writer);
-        let log = Arc::clone(&log);
-        std::thread::spawn(move || {
-            let send = |v: serde_json::Value| {
-                log.log("out", v["type"].as_str().unwrap_or("?"), &v);
-                let _ = writer.send(&v);
-            };
-            match update::check_and_self_update() {
-                Ok(Some(tag)) => {
-                    send(json!({ "type": "update", "component": "agent", "tag": tag }))
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    eprintln!("[cc-webreview-agent] self-update: {e}");
-                    log.note("self_update_error", &e);
-                }
-            }
-            match update::update_extension() {
-                Ok(Some(tag)) => {
-                    send(json!({ "type": "update", "component": "extension", "tag": tag }))
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    eprintln!("[cc-webreview-agent] extension update: {e}");
-                    log.note("ext_update_error", &e);
-                }
-            }
-        });
-    }
+    // Chrome の拡張リロードで反映される。起動時は適用があった時のみ通知。
+    spawn_update_check(&writer, &log, false);
 
     let mut active: Option<Session> = None;
 
@@ -226,6 +197,11 @@ fn run_native_host() {
                     }
                 }
             }
+            HostCommand::CheckUpdate => {
+                // 手動更新チェック (side panel の「更新確認」ボタン)。結果は
+                // {type:"update_status"} で全件返す (最新でもフィードバックを出す)。
+                spawn_update_check(&writer, &log, true);
+            }
             HostCommand::Stop => {
                 if let Some(mut s) = active.take() {
                     s.kill();
@@ -250,4 +226,80 @@ fn run_native_host() {
         log.note("kill_on_eof", "claude killed");
         s.kill();
     }
+}
+
+/// 更新チェック (#6) を別スレッドで実行する (stdio ループを塞がない)。
+/// - 起動時 (`manual=false`): 適用があった時だけ `{type:"update"}` を通知
+/// - 手動 (`manual=true`、`{cmd:"check_update"}`): 最新/対象外/失敗も含め全結果を
+///   `{type:"update_status", component, status, tag?, error?}` で返す
+fn spawn_update_check(writer: &Arc<SharedWriter<io::Stdout>>, log: &Arc<DebugLog>, manual: bool) {
+    let writer = Arc::clone(writer);
+    let log = Arc::clone(log);
+    std::thread::spawn(move || {
+        let send = |v: serde_json::Value| {
+            log.log("out", v["type"].as_str().unwrap_or("?"), &v);
+            let _ = writer.send(&v);
+        };
+        let status = |component: &str, st: &str, tag: Option<&str>, error: Option<&str>| {
+            send(json!({
+                "type": "update_status",
+                "component": component,
+                "status": st,
+                "tag": tag,
+                "error": error,
+            }));
+        };
+
+        // agent 本体。ローカル dev ビルド (tag なし) は自動更新対象外。
+        if update::current_release_tag().is_none() {
+            if manual {
+                status("agent", "dev_build", None, None);
+            }
+        } else {
+            match update::check_and_self_update() {
+                Ok(Some(tag)) => {
+                    if manual {
+                        status("agent", "applied", Some(&tag), None);
+                    } else {
+                        send(json!({ "type": "update", "component": "agent", "tag": tag }));
+                    }
+                }
+                Ok(None) => {
+                    if manual {
+                        status("agent", "up_to_date", None, None);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[cc-webreview-agent] self-update: {e}");
+                    log.note("self_update_error", &e);
+                    if manual {
+                        status("agent", "error", None, Some(&e));
+                    }
+                }
+            }
+        }
+
+        // 同梱拡張。
+        match update::update_extension() {
+            Ok(Some(tag)) => {
+                if manual {
+                    status("extension", "applied", Some(&tag), None);
+                } else {
+                    send(json!({ "type": "update", "component": "extension", "tag": tag }));
+                }
+            }
+            Ok(None) => {
+                if manual {
+                    status("extension", "up_to_date", None, None);
+                }
+            }
+            Err(e) => {
+                eprintln!("[cc-webreview-agent] extension update: {e}");
+                log.note("ext_update_error", &e);
+                if manual {
+                    status("extension", "error", None, Some(&e));
+                }
+            }
+        }
+    });
 }

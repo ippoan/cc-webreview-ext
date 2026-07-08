@@ -6,6 +6,7 @@
     body { font-family: system-ui, sans-serif; font-size: 13px; margin: 8px; }
     #status { color: #555; margin-bottom: 6px; min-height: 1.2em; }
     #prompt { width: 100%; box-sizing: border-box; height: 72px; }
+    #extraArgs { width: 100%; box-sizing: border-box; margin-top: 4px; font-family: monospace; font-size: 12px; }
     .row { display: flex; gap: 6px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
     button { cursor: pointer; }
     #timeline { border-top: 1px solid #ddd; margin-top: 8px; padding-top: 8px; }
@@ -35,11 +36,15 @@
     </div>
   </div>
   <textarea id="prompt" placeholder="claude に渡す prompt (例: このリポジトリの README を要約して)"></textarea>
+  <input id="extraArgs" type="text"
+         placeholder="追加 CLI 引数 (空白区切り。例: --allowedTools mcp__claude-in-chrome__navigate)"
+         title="-p は対話承認できないため、ツールを使う場合は --allowedTools 等をここで許可する。空白を含む値は未対応">
   <div class="row">
     <label><input type="checkbox" id="chrome"> --chrome</label>
     <button id="start">Start</button>
     <button id="stop">Stop</button>
     <button id="ping">Ping</button>
+    <button id="checkUpdate">更新確認</button>
   </div>
   <div id="timeline"></div>
   <script src="sidepanel.js"></script>

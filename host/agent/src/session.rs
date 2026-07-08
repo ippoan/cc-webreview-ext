@@ -33,6 +33,8 @@ pub enum HostCommand {
     Ping,
     Start(StartRequest),
     Stop,
+    /// 手動更新チェック (#6)。結果は {type:"update_status"} で返す。
+    CheckUpdate,
     Unknown(String),
 }
 
@@ -41,6 +43,7 @@ pub fn parse_command(v: &Value) -> HostCommand {
     match v.get("cmd").and_then(Value::as_str).unwrap_or("") {
         "ping" => HostCommand::Ping,
         "stop" => HostCommand::Stop,
+        "check_update" => HostCommand::CheckUpdate,
         "start" => {
             let prompt = v
                 .get("prompt")
@@ -75,10 +78,15 @@ pub fn parse_command(v: &Value) -> HostCommand {
 }
 
 /// claude の引数を組み立てる純関数。stream-json 前提の固定部 + オプション。
+///
+/// **prompt は argv に入れない** (stdin で渡す)。argv 渡しは (1) `.cmd` shim の
+/// `cmd /C` が改行入り引数を分断する、(2) `-` で始まる行が claude の option parser に
+/// `unknown option` として食われる、の 2 経路で複数行プロンプトが壊れる (#4 実機で
+/// `error: unknown option '--chrome で…'` を観測)。`claude -p` は stdin が pipe の時
+/// stdin 全体をプロンプトとして読む。
 pub fn build_claude_args(req: &StartRequest) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
-        req.prompt.clone(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--verbose".to_string(),
@@ -126,7 +134,7 @@ pub fn spawn_claude<W: Write + Send + 'static>(
 ) -> Result<Session, String> {
     let mut cmd = command_for(claude);
     cmd.args(build_claude_args(req))
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(cwd) = &req.cwd {
@@ -143,8 +151,23 @@ pub fn spawn_claude<W: Write + Send + 'static>(
         .map_err(|e| format!("claude spawn 失敗 ({}): {e}", claude.display()))?;
 
     let last_session_id = Arc::new(Mutex::new(None::<String>));
+    let stdin = child.stdin.take().ok_or("stdin pipe が取れない")?;
     let stdout = child.stdout.take().ok_or("stdout pipe が取れない")?;
     let stderr = child.stderr.take().ok_or("stderr pipe が取れない")?;
+
+    // prompt を stdin に書いて閉じる (EOF = プロンプト確定)。pipe buffer が詰まっても
+    // メインループを塞がないよう専用スレッドで書く。
+    {
+        let prompt = req.prompt.clone();
+        let l = Arc::clone(log);
+        std::thread::spawn(move || {
+            let mut stdin = stdin;
+            if let Err(e) = stdin.write_all(prompt.as_bytes()) {
+                l.note("stdin_write_error", &e.to_string());
+            }
+            // drop で close → claude が読み終わる
+        });
+    }
 
     // stdout: JSONL → {type:"claude", data} (parse 不能行は {type:"raw"})。
     {
@@ -269,6 +292,10 @@ mod tests {
         assert_eq!(parse_command(&json!({ "cmd": "ping" })), HostCommand::Ping);
         assert_eq!(parse_command(&json!({ "cmd": "stop" })), HostCommand::Stop);
         assert_eq!(
+            parse_command(&json!({ "cmd": "check_update" })),
+            HostCommand::CheckUpdate
+        );
+        assert_eq!(
             parse_command(&json!({ "cmd": "explode" })),
             HostCommand::Unknown("explode".to_string())
         );
@@ -309,10 +336,11 @@ mod tests {
 
     #[test]
     fn build_args_baseline() {
-        let args = build_claude_args(&start_req("hello"));
+        // prompt は argv に**入らない** (stdin 渡し。改行 / `-` 始まり行の mangle 防止)。
+        let args = build_claude_args(&start_req("hello\n- [ ] --chrome を試す"));
         assert_eq!(
             args,
-            vec!["-p", "hello", "--output-format", "stream-json", "--verbose"]
+            vec!["-p", "--output-format", "stream-json", "--verbose"]
         );
     }
 
@@ -357,22 +385,22 @@ mod tests {
         let buf = Buf(Arc::new(Mutex::new(Vec::new())));
         let writer = Arc::new(SharedWriter::new(buf.clone()));
 
-        // "claude" の代役: JSONL 1 行 + 非 JSON 1 行を吐いて終了する sh。
+        // 複数行 + `-` 始まり行の prompt が stdin 経由で**そのまま**届くことを固定する
+        // (argv 渡し時代は cmd /C 分断 + unknown option で壊れた、#4 実機観測)。
         let req = StartRequest {
-            prompt: "ignored".to_string(),
+            prompt: "line1\n- [ ] --chrome を試す".to_string(),
             chrome: false,
-            // sh は -p 等を無視できないので、代役スクリプトを -c で渡すため extra_args は使わず
-            // command_for を直接テストせずに sh -c でラップする。
             extra_args: vec![],
             cwd: None,
         };
-        // sh に claude 互換の引数を食わせるため、引数を無視するラッパを作る。
+        // "claude" の代役: stdin (= prompt) を読み切り、JSONL 1 行 + prompt をそのまま
+        // echo して終了する sh (prompt round-trip の検証)。
         let dir = std::env::temp_dir().join(format!("ccwr-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("fake-claude");
         std::fs::write(
             &script,
-            "#!/bin/sh\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sid-1\"}'\necho not-json\n",
+            "#!/bin/sh\np=$(cat)\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sid-1\"}'\necho \"$p\"\n",
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -391,15 +419,17 @@ mod tests {
         while let Some(m) = read_message(&mut cursor).unwrap() {
             msgs.push(m);
         }
-        // claude(JSON) / raw(非JSON) / proc(exit) の 3 件。
+        // claude(JSON) / raw(prompt 1 行目) / raw(prompt 2 行目) / proc(exit) の 4 件。
         assert_eq!(msgs[0]["type"], "claude");
         assert_eq!(msgs[0]["data"]["session_id"], "sid-1");
         assert_eq!(msgs[1]["type"], "raw");
-        assert_eq!(msgs[1]["data"], "not-json");
-        assert_eq!(msgs[2]["type"], "proc");
-        assert_eq!(msgs[2]["event"], "exit");
-        assert_eq!(msgs[2]["code"], 0);
-        assert_eq!(msgs[2]["session_id"], "sid-1");
+        assert_eq!(msgs[1]["data"], "line1");
+        assert_eq!(msgs[2]["type"], "raw");
+        assert_eq!(msgs[2]["data"], "- [ ] --chrome を試す");
+        assert_eq!(msgs[3]["type"], "proc");
+        assert_eq!(msgs[3]["event"], "exit");
+        assert_eq!(msgs[3]["code"], 0);
+        assert_eq!(msgs[3]["session_id"], "sid-1");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

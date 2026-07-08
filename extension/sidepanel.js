@@ -9,6 +9,8 @@ const chromeEl = document.getElementById('chrome');
 const authBanner = document.getElementById('authBanner');
 const authReason = document.getElementById('authReason');
 
+const extraArgsEl = document.getElementById('extraArgs');
+
 const port = chrome.runtime.connect({ name: 'panel' });
 port.onMessage.addListener(render);
 port.postMessage({ cmd: 'replay' });
@@ -20,14 +22,21 @@ document.getElementById('start').addEventListener('click', () => {
     return;
   }
   timeline.textContent = '';
+  lastAssistantText = '';
   // 再実行時はバナーを一旦引っ込め、新セッションで再検知させる。
   authBannerSticky = false;
   authBanner.hidden = true;
-  port.postMessage({ cmd: 'start', prompt, chrome: chromeEl.checked });
+  // 追加 CLI 引数 (空白区切り)。-p は対話承認できないため --allowedTools 等を渡す用。
+  const extraArgs = extraArgsEl.value.trim() ? extraArgsEl.value.trim().split(/\s+/) : [];
+  port.postMessage({ cmd: 'start', prompt, chrome: chromeEl.checked, extra_args: extraArgs });
   setStatus('起動中…');
 });
 document.getElementById('stop').addEventListener('click', () => port.postMessage({ cmd: 'stop' }));
 document.getElementById('ping').addEventListener('click', () => port.postMessage({ cmd: 'ping' }));
+document.getElementById('checkUpdate').addEventListener('click', () => {
+  port.postMessage({ cmd: 'check_update' });
+  setStatus('更新確認中…');
+});
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -111,6 +120,9 @@ function toolSummary(block) {
   return `🔧 ${block.name}${briefStr ? ': ' + briefStr : ''}`;
 }
 
+// 直近の assistant text (result カードの 2 重表示防止に使う)。
+let lastAssistantText = '';
+
 function renderClaudeEvent(data) {
   const t = data.type;
   if (t === 'system' && data.subtype === 'init') {
@@ -120,8 +132,10 @@ function renderClaudeEvent(data) {
   if (t === 'assistant') {
     const content = (data.message && data.message.content) || [];
     for (const block of content) {
-      if (block.type === 'text' && block.text) add('ev-text', block.text);
-      else if (block.type === 'tool_use') add('ev-tool', toolSummary(block));
+      if (block.type === 'text' && block.text) {
+        add('ev-text', block.text);
+        lastAssistantText = block.text;
+      } else if (block.type === 'tool_use') add('ev-tool', toolSummary(block));
     }
     return;
   }
@@ -138,10 +152,13 @@ function renderClaudeEvent(data) {
   }
   if (t === 'result') {
     setStatus(`完了 (${data.subtype || 'result'})`);
-    detectAuthError(data.result);
+    const resultText = typeof data.result === 'string' ? data.result : '';
+    detectAuthError(resultText);
+    // -p の result 本文は最後の assistant text と同一のことが多い。
+    // 直前に描画済みなら result カードでは本文を省略する (2 重表示防止)。
+    const isDup = resultText.trim() !== '' && resultText.trim() === lastAssistantText.trim();
     const lines = [
-      data.result || '',
-      '',
+      ...(isDup ? [] : [resultText, '']),
       `session_id: ${data.session_id || '?'}`,
       `cost: $${data.total_cost_usd != null ? data.total_cost_usd : '?'} / turns: ${data.num_turns != null ? data.num_turns : '?'}`,
     ];
@@ -190,6 +207,23 @@ function render(msg) {
           : `agent を ${msg.tag} に更新しました (次回の起動から反映されます)`
       );
       break;
+    case 'update_status': {
+      // 「更新確認」ボタンの結果 (最新でもフィードバックを出す)。
+      const who = msg.component === 'extension' ? '拡張' : 'agent';
+      const text =
+        msg.status === 'applied'
+          ? msg.component === 'extension'
+            ? `拡張を ${msg.tag} に更新しました → chrome://extensions でリロードすると反映されます`
+            : `agent を ${msg.tag} に更新しました (次回の起動から反映されます)`
+          : msg.status === 'up_to_date'
+            ? `${who} は最新です`
+            : msg.status === 'dev_build'
+              ? 'ローカルビルドのため自動更新の対象外です'
+              : `${who} の更新確認に失敗: ${msg.error || '?'}`;
+      add(msg.status === 'error' ? 'ev-error' : 'ev-proc', text);
+      setStatus('更新確認完了');
+      break;
+    }
     case 'busy':
       setStatus('busy: 既にセッションが走っています');
       break;
