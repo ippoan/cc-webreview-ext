@@ -41,7 +41,8 @@ Claude in Chrome 拡張 v1.0.36+ も。
    実在しないパスを渡すと登録は失敗する (プレースホルダのコピペ事故防止)。
    `Get-Command` で見つからない場合は `where.exe claude` で場所を探す。
 
-4. **動作確認**: ツールバーの cc-webreview アイコン → side panel が開く →
+4. **動作確認**: ツールバーの cc-webreview アイコン (または `Alt+C` — 開閉トグル、
+   変更は `chrome://extensions/shortcuts`) → side panel が開く →
    `Ping` で `host vX.Y.Z 接続 / claude: <path>` が出れば host 接続 OK →
    prompt を入れて `Start`。claude の stream-json イベントがタイムラインに流れる。
    service worker の console (`chrome://extensions` → Service Worker「検証」) にも全イベントが出る。
