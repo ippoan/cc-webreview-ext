@@ -156,11 +156,17 @@ pub fn spawn_terminal<W: Write + Send + 'static>(
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             let mut total: u64 = 0;
+            // 起動直後に落ちた時の診断用に出力の先頭だけ残す (--debug-dump で読む)。
+            let mut head: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break, // EOF / PTY closed
                     Ok(n) => {
                         total += n as u64;
+                        if head.len() < 2048 {
+                            let take = n.min(2048 - head.len());
+                            head.extend_from_slice(&buf[..take]);
+                        }
                         let msg = json!({
                             "type": "term_out",
                             "data": B64.encode(&buf[..n]),
@@ -178,7 +184,13 @@ pub fn spawn_terminal<W: Write + Send + 'static>(
                 .ok()
                 .map(|st| st.exit_code())
                 .unwrap_or(0);
-            l.note("term_exit", &format!("code={code} bytes={total}"));
+            l.note(
+                "term_exit",
+                &format!(
+                    "code={code} bytes={total} head={}",
+                    String::from_utf8_lossy(&head)
+                ),
+            );
             let _ = w.send(&json!({ "type": "term_exit", "code": code }));
         });
     }
