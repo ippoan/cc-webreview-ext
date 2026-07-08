@@ -244,6 +244,21 @@ function add(cls, text) {
   return div;
 }
 
+// 拡張が更新された時の通知行 (リロードボタン付き)。runtime.reload() は SW ごと
+// 再起動するので side panel も一旦閉じる — セッションが走っていない時に押す想定。
+function addExtUpdated(tag) {
+  const div = document.createElement('div');
+  div.className = 'ev ev-proc';
+  div.textContent = `拡張を ${tag} に更新しました → `;
+  const btn = document.createElement('button');
+  btn.textContent = '拡張をリロード';
+  btn.title = '拡張をリロードして新版を反映する (side panel は一旦閉じる。実行中セッションがあれば終了する)';
+  btn.addEventListener('click', () => chrome.runtime.reload());
+  div.appendChild(btn);
+  timeline.appendChild(div);
+  div.scrollIntoView({ block: 'nearest' });
+}
+
 function addCollapsed(summaryText, bodyText) {
   const details = document.createElement('details');
   const summary = document.createElement('summary');
@@ -346,21 +361,23 @@ function render(msg) {
       break;
     case 'update':
       // host 起動時のバックグラウンド更新 (#6)。適用された時だけ届く。
-      add(
-        'ev-proc',
-        msg.component === 'extension'
-          ? `拡張を ${msg.tag} に更新しました → chrome://extensions でリロードすると反映されます`
-          : `agent を ${msg.tag} に更新しました (次回の起動から反映されます)`
-      );
+      if (msg.component === 'extension') {
+        addExtUpdated(msg.tag);
+      } else {
+        add('ev-proc', `agent を ${msg.tag} に更新しました (次回の起動から反映されます)`);
+      }
       break;
     case 'update_status': {
       // 「更新確認」ボタンの結果 (最新でもフィードバックを出す)。
       const who = msg.component === 'extension' ? '拡張' : 'agent';
+      if (msg.status === 'applied' && msg.component === 'extension') {
+        addExtUpdated(msg.tag);
+        setStatus('更新確認完了');
+        break;
+      }
       const text =
         msg.status === 'applied'
-          ? msg.component === 'extension'
-            ? `拡張を ${msg.tag} に更新しました → chrome://extensions でリロードすると反映されます`
-            : `agent を ${msg.tag} に更新しました (次回の起動から反映されます)`
+          ? `agent を ${msg.tag} に更新しました (次回の起動から反映されます)`
           : msg.status === 'up_to_date'
             ? `${who} は最新です`
             : msg.status === 'dev_build'
