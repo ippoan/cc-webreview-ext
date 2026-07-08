@@ -24,6 +24,14 @@ on:
         description: 'tag を打つ先の SHA (PR head)。checkout もこの ref で行う。'
         required: true
         type: string
+    secrets:
+      MINISIGN_SECRET_KEY:
+        description: |
+          minisign の無パスワード秘密鍵 (`minisign -G -W` の .key の中身、2 行)。
+          各 .zip を署名し `<asset>.minisig` を Release に添付する。agent self-update
+          (update.rs) は署名検証に通らない asset を適用しないため **必須**。
+          cdp-relay と共用の org secret (caller は `secrets: inherit` で渡す)。
+        required: true
   push:
     tags:
       - 'agent-v*'
@@ -110,7 +118,74 @@ jobs:
           "$mhash" | Out-File -Encoding ascii "$($msi.FullName).sha256"
           Get-Item $zip
 
-      - name: Upload MSI + extension zip to release
+      - name: Package agent zip + sha256 (self-update 配布物)
+        # update.rs (self-update) が DL する asset。名前に x86_64-pc-windows-msvc を
+        # 含める (pick_windows_asset のマーク) — 拡張 zip と混同されない命名にする。
+        shell: pwsh
+        run: |
+          $zip = "cc-webreview-agent-$env:TAG-x86_64-pc-windows-msvc.zip"
+          Compress-Archive -Path "target/release/cc-webreview-agent.exe" -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash" | Out-File -Encoding ascii "$zip.sha256"
+          Get-Item $zip
+
+      - name: Stage dist
+        # 署名 (minisign) は ubuntu の publish job で一括して行うため artifact で渡す。
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/wix/*.msi target/wix/*.msi.sha256 dist/
+          cp cc-webreview-extension-*.zip cc-webreview-extension-*.zip.sha256 dist/
+          cp cc-webreview-agent-*-x86_64-pc-windows-msvc.zip \
+             cc-webreview-agent-*-x86_64-pc-windows-msvc.zip.sha256 dist/
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: host/dist/*
+          if-no-files-found: error
+
+  # 全 asset を ubuntu で一括 minisign 署名して Release を作る (per-OS runner に
+  # minisign を入れるより単純 — ci-workflows rust-binary-release.yml と同型)。
+  publish:
+    runs-on: ubuntu-latest
+    needs: msi
+    env:
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Sign archives with minisign
+        # update.rs は .minisig の無い asset を適用しないため、署名は必須 (skip しない)。
+        # secret 未着は loud fail — 「署名なし Release が黙って出る」方が実害が大きい。
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::error::MINISIGN_SECRET_KEY が空 (org secret 未設定か workflow_call の secrets 未転送)"
+            exit 1
+          fi
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          # 秘密鍵は file 経由でのみ minisign に渡し、終了時に shred する。
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+          shopt -s nullglob
+          signed=0
+          for f in dist/*.zip; do
+            minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$f" -x "$f.minisig" </dev/null
+            signed=$((signed + 1))
+          done
+          shred -u "$RUNNER_TEMP/minisign.key"
+          echo "signed $signed archive(s)"
+          ls -la dist/
+
+      - name: Create release with assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag_name || github.ref_name }}
@@ -120,9 +195,5 @@ jobs:
           # 作られ "Latest" を奪う (cdp-relay で実害)。
           # stable tag (agent-vX.Y.Z) は非 prerelease のまま → Latest になる。
           prerelease: ${{ contains(inputs.tag_name || github.ref_name, '-dev-') }}
-          files: |
-            host/target/wix/*.msi
-            host/target/wix/*.msi.sha256
-            host/cc-webreview-extension-*.zip
-            host/cc-webreview-extension-*.zip.sha256
+          files: dist/*
           fail_on_unmatched_files: true

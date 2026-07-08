@@ -48,8 +48,23 @@ Claude in Chrome 拡張 v1.0.36+ も。
   prerelease 添付まで行う (`ci.yml` の dev-release job → `release.yml` を workflow_call)。
   **merge を待たずに PR 時点の MSI を試せる**。auto-merge は MSI ビルド成功も gate。
 - **stable**: `agent-vX.Y.Z` tag push (非 prerelease = Latest)。
-- 更新は新しい MSI を入れ直すだけ (MajorUpgrade で上書き、native host 登録も貼り替え)。
-  agent 内蔵 self-update / minisign 署名検証は未実装 (#6 の残タスク)。
+- 手動更新は新しい MSI を入れ直すだけ (MajorUpgrade で上書き、native host 登録も貼り替え)。
+
+### 自動更新 (self-update)
+
+リリースビルド (tag 埋め込みあり) の agent は、Chrome から起動されるたびに
+バックグラウンドで GitHub Releases をチェックし:
+
+- **agent 本体**: `agent-dev-N` の新しい release があれば
+  `cc-webreview-agent-<tag>-x86_64-pc-windows-msvc.zip` を DL → **minisign 署名検証**
+  (`.minisig`、公開鍵は update.rs にハードコード) → `self_replace`。**次回起動から反映**。
+- **同梱拡張**: install dir の `extension\` を最新の `cc-webreview-extension-<tag>.zip`
+  (こちらも署名検証必須) で上書きし、side panel に「リロードで反映」を通知
+  (`.ext-version` marker で適用済み tag を記録)。
+
+ローカルビルド (tag なし) は自動更新しない (開発中の自分を上書きしない)。
+署名の秘密鍵は org secret `MINISIGN_SECRET_KEY` (cdp-relay と共用)、release workflow
+(`publish` job) が全 zip asset を署名する。署名の無い asset は適用されない。
 
 ### ソースからビルドする場合 (開発者向け)
 
@@ -75,7 +90,7 @@ cargo build --release
 ## プロトコル (拡張 ↔ host)
 
 - 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}`
-- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"}`。
+- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"}`。
   512KB 超は `{type:"chunk", id, seq, last, data}` に分割 (background.js が再結合)。
 
 ## 開発

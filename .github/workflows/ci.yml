@@ -61,6 +61,9 @@ jobs:
     with:
       tag_name: agent-dev-${{ github.run_number }}
       target_commitish: ${{ github.event.pull_request.head.sha }}
+    # MINISIGN_SECRET_KEY (org secret) を release.yml の署名 step に渡す。
+    # 同一 repo の workflow_call でも inherit しないと secret は届かない。
+    secrets: inherit
 
   # CI green (dev release の MSI ビルド成功込み) → squash auto-merge
   # (cdp-relay 等の org 標準パターン)。deploy 系 job は本 repo に無いので
