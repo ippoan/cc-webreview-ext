@@ -31,11 +31,15 @@ Claude in Chrome 拡張 v1.0.36+ も。
    (manifest の `key` で固定済み。違う ID になったら manifest が壊れている)。
 
 3. **claude.exe のパス設定 (必要な場合のみ)**: `%USERPROFILE%\.local\bin\claude.exe`
-   に居るなら不要。それ以外の場所なら一度だけ:
+   に居るなら不要。それ以外の場所なら一度だけ (実パスを自動解決してそのまま登録):
 
    ```powershell
-   & "$env:LOCALAPPDATA\Programs\cc-webreview-agent\cc-webreview-agent.exe" --register --claude-path "C:\path\to\claude.exe"
+   $claude = (Get-Command claude.exe -ErrorAction Stop).Source
+   & "$env:LOCALAPPDATA\Programs\cc-webreview-agent\cc-webreview-agent.exe" --register --claude-path $claude
    ```
+
+   実在しないパスを渡すと登録は失敗する (プレースホルダのコピペ事故防止)。
+   `Get-Command` で見つからない場合は `where.exe claude` で場所を探す。
 
 4. **動作確認**: ツールバーの cc-webreview アイコン → side panel が開く →
    `Ping` で `host vX.Y.Z 接続 / claude: <path>` が出れば host 接続 OK →
