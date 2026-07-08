@@ -45,17 +45,36 @@ jobs:
       - name: manifest.json parse
         run: python3 -c "import json; json.load(open('extension/manifest.json'))"
 
-  # CI green → squash auto-merge (cdp-relay 等の org 標準パターン)。
-  # deploy 系 job は本 repo に無いので deploy gate はそのまま通る。
+  # dev release は PR の CI から出す (main merge 後に再ビルドしない = build は 1 回)。
+  # tag `agent-dev-<run_number>` (単調増加) の prerelease を PR head に打ち、
+  # MSI + 拡張 zip を添付する。fork PR は token 権限が無いので同一 repo 限定。
+  dev-release:
+    name: Dev Release (MSI)
+    needs: [rust, extension]
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+    with:
+      tag_name: agent-dev-${{ github.run_number }}
+      target_commitish: ${{ github.event.pull_request.head.sha }}
+
+  # CI green (dev release の MSI ビルド成功込み) → squash auto-merge
+  # (cdp-relay 等の org 標準パターン)。deploy 系 job は本 repo に無いので
+  # deploy gate はそのまま通る。
   auto-merge:
     name: Auto Merge
-    needs: [rust, extension]
+    needs: [rust, extension, dev-release]
     if: >-
       always() &&
       github.event_name == 'pull_request' &&
       github.event.pull_request.draft == false &&
       needs.rust.result == 'success' &&
-      needs.extension.result == 'success'
+      needs.extension.result == 'success' &&
+      needs['dev-release'].result == 'success'
     uses: ippoan/ci-workflows/.github/workflows/auto-merge.yml@main
     permissions:
       contents: write

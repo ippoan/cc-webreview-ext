@@ -44,9 +44,10 @@ Claude in Chrome 拡張 v1.0.36+ も。
 
 ### リリースサイクル
 
-- `host/` / `extension/` が main に merge されると `dev-tag.yml` が `agent-dev-N` を
-  自動採番 → `release.yml` が MSI + 拡張 zip (`cc-webreview-extension-*.zip`) を
-  prerelease として添付する。stable は `agent-vX.Y.Z` tag (非 prerelease = Latest)。
+- **dev**: PR (non-draft) の CI が build 1 回で test → MSI → `agent-dev-<run>` の
+  prerelease 添付まで行う (`ci.yml` の dev-release job → `release.yml` を workflow_call)。
+  **merge を待たずに PR 時点の MSI を試せる**。auto-merge は MSI ビルド成功も gate。
+- **stable**: `agent-vX.Y.Z` tag push (非 prerelease = Latest)。
 - 更新は新しい MSI を入れ直すだけ (MajorUpgrade で上書き、native host 登録も貼り替え)。
   agent 内蔵 self-update / minisign 署名検証は未実装 (#6 の残タスク)。
 

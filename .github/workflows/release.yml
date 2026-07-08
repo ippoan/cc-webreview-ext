@@ -1,19 +1,32 @@
 name: Release
 
-# SOURCE-MIRROR: ippoan/cdp-relay:.github/workflows/release-msi.yml
-# agent-dev-N / agent-vX.Y.Z の tag push で Windows MSI (cargo-wix) + 拡張 zip を
-# ビルドして GitHub Release に添付する (cc-webreview-ext#6)。
-# MSI は host exe + MV3 拡張を同梱し、install 時の custom action で native host を
-# HKCU 登録する — git clone 不要で「MSI 1 発 → 拡張フォルダを読み込む」だけにする。
+# SOURCE-MIRROR: ippoan/cdp-relay:.github/workflows/release-msi.yml (構成を PR-build に変更)
+# Windows MSI (cargo-wix) + 拡張 zip をビルドして GitHub Release に添付する
+# (cc-webreview-ext#6)。MSI は host exe + MV3 拡張を同梱し、install 時の custom action で
+# native host を HKCU 登録する — git clone 不要で「MSI 1 発 → 拡張フォルダを読み込む」。
+#
+# 起動経路は 2 つ (build は各経路 1 回だけ — main merge 後の再ビルドはしない):
+#   1. workflow_call — ci.yml の dev-release job が PR の CI から呼ぶ。
+#      tag `agent-dev-<run_number>` の prerelease を PR head に打つ。
+#   2. push tags 'agent-v*' — stable。tag をそのまま Release にする (非 prerelease = Latest)。
 #
 # NOTE: MSI ビルドは CCoW で検証できず windows-latest + WiX toolset 依存。cargo-wix の
 # フラグや CargoTargetBinDir 解決は初回 CI で要調整 (cdp-relay と同じ注意書き)。
 
 on:
+  workflow_call:
+    inputs:
+      tag_name:
+        description: 'Release の tag 名 (例 agent-dev-123)。未指定なら push された tag を使う。'
+        required: true
+        type: string
+      target_commitish:
+        description: 'tag を打つ先の SHA (PR head)。checkout もこの ref で行う。'
+        required: true
+        type: string
   push:
     tags:
       - 'agent-v*'
-      - 'agent-dev-*'
 
 permissions:
   contents: write
@@ -24,8 +37,15 @@ jobs:
     defaults:
       run:
         working-directory: host
+    env:
+      # run へ直接 ${{ }} 展開しない (tag 名は $() 等を含み得るため env 経由)。
+      TAG: ${{ inputs.tag_name || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_call (PR dev release) では tag を打つ head SHA と同じコードを
+          # ビルドする。tag push では default (= tag の commit)。
+          ref: ${{ inputs.target_commitish || '' }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -36,23 +56,20 @@ jobs:
 
       - name: Build cc-webreview-agent (release)
         env:
-          CC_WEBREVIEW_RELEASE_TAG: ${{ github.ref_name }}
+          CC_WEBREVIEW_RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
         run: cargo build --release --locked -p cc-webreview-agent
 
       - name: Compute version (dev-N -> 0.0.N / vX.Y.Z -> X.Y.Z)
         id: ver
         shell: bash
-        env:
-          # run へ直接 ${{ }} 展開しない (tag 名は $() 等を含み得るため env 経由)。
-          TAG: ${{ github.ref_name }}
         run: |
-          tag="$TAG"
-          if [[ "$tag" =~ ^agent-dev-([0-9]+)$ ]]; then
+          if [[ "$TAG" =~ ^agent-dev-([0-9]+)$ ]]; then
             echo "version=0.0.${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-          elif [[ "$tag" =~ ^agent-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+          elif [[ "$TAG" =~ ^agent-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
           else
-            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+            echo "::error::tag が想定形式 (agent-dev-N / agent-vX.Y.Z) ではない: $TAG"
+            exit 1
           fi
 
       - name: Bundle MV3 extension (manifest stamp + CargoTargetBinDir\extension に配置)
@@ -79,11 +96,9 @@ jobs:
           --install-version ${{ steps.ver.outputs.version }}
           --output target/wix/cc-webreview-agent-${{ steps.ver.outputs.version }}-x86_64.msi
 
-      - name: Package extension zip
+      - name: Package extension zip + sha256
         # windows-latest に zip コマンドが無いので PowerShell の Compress-Archive を使う。
         shell: pwsh
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           $zip = "cc-webreview-extension-$env:TAG.zip"
           # target/release/extension の中身を flat に固める (chrome unpacked 読込用)。
@@ -98,11 +113,13 @@ jobs:
       - name: Upload MSI + extension zip to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          # `-` を含む tag (agent-dev-N) は prerelease。揃えないと dev-* が
-          # 非 prerelease で作られ "Latest" を奪う (cdp-relay で実害)。
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          # workflow_call (dev) では tag が未存在なので PR head に打つ。
+          target_commitish: ${{ inputs.target_commitish || '' }}
+          # `-dev-` を含む tag は prerelease。揃えないと dev-* が非 prerelease で
+          # 作られ "Latest" を奪う (cdp-relay で実害)。
           # stable tag (agent-vX.Y.Z) は非 prerelease のまま → Latest になる。
-          prerelease: ${{ contains(github.ref_name, '-dev-') }}
+          prerelease: ${{ contains(inputs.tag_name || github.ref_name, '-dev-') }}
           files: |
             host/target/wix/*.msi
             host/target/wix/*.msi.sha256
