@@ -230,6 +230,9 @@ fn run_native_host() {
                     }));
                     continue;
                 };
+                // パネル再読み込みで拡張側の allowlist が消えていても resume を
+                // 空振りさせない (レビュー既定の read-only allowlist を補う)。
+                start.allowed_tools = review::allowlist_or_review_default(start.allowed_tools);
                 let Some(claude) = register::resolve_claude_path() else {
                     emit(json!({
                         "type": "error",

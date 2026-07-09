@@ -60,6 +60,21 @@ pub fn review_allowed_tools() -> Vec<String> {
     .to_vec()
 }
 
+/// resume 時に allowlist が空ならレビュー既定を適用する (#27 Web Review 指摘)。
+///
+/// 拡張の `reviewAllowedTools` はパネル再読み込みで消えるため、「レビュー失敗 →
+/// パネルを閉じた → 開き直して 続きから」の典型経路で allowlist が空で届く。
+/// 空のまま `-p` を resume すると未許可ツールが全部拒否され gh を一切叩けず
+/// 空振りになる (fail-safe 側だが resume が機能しない)。resume は現状レビュー
+/// 専用導線なので、空なら read-only 既定を host 側で補う。
+pub fn allowlist_or_review_default(tools: Vec<String>) -> Vec<String> {
+    if tools.is_empty() {
+        review_allowed_tools()
+    } else {
+        tools
+    }
+}
+
 /// テンプレに PR 情報を差し込む。単一パス置換 — 差し込んだ値の中にプレースホルダ
 /// 文字列が含まれていても再置換しない (PR タイトル経由のテンプレ注入防止)。
 /// テンプレ先頭の HTML コメント (repo 読者向けメタ) は取り除く。
@@ -183,5 +198,16 @@ mod tests {
         assert!(!tools.iter().any(|t| t == "Edit" || t == "Write"));
         // --allowedTools は comma join で 1 引数に組むため、rule に comma を含めない
         assert!(!tools.iter().any(|t| t.contains(',')));
+    }
+
+    #[test]
+    fn resume_allowlist_defaults_when_empty() {
+        // パネル再読み込みで allowed_tools が空で届く resume にはレビュー既定を補う
+        assert_eq!(allowlist_or_review_default(vec![]), review_allowed_tools());
+        // 明示指定があればそのまま (上書きしない)
+        assert_eq!(
+            allowlist_or_review_default(vec!["Read".to_string()]),
+            vec!["Read".to_string()]
+        );
     }
 }

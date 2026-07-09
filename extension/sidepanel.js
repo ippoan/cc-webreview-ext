@@ -50,7 +50,9 @@ document.getElementById('start').addEventListener('click', () => {
 // 回した場合、最後に走った別 PR のセッションを掴む — per-PR resume は後続対応)。
 document.getElementById('resume').addEventListener('click', () => {
   const extraArgs = beginRun();
-  reviewRun = reviewAllowedTools.length > 0;
+  // resume はレビュー専用導線: パネル再読み込みで reviewAllowedTools が空でも
+  // review 扱いにする (allowlist は host がレビュー既定を補う。#27 Web Review 指摘)。
+  reviewRun = true;
   port.postMessage({
     cmd: 'resume',
     prompt:
