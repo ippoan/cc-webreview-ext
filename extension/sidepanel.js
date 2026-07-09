@@ -397,8 +397,13 @@ document.getElementById('termStart').addEventListener('click', () => {
   const extraArgs = extraArgsEl.value.trim() ? extraArgsEl.value.trim().split(/\s+/) : [];
   // 既定で auto mode で起動する — terminal を開くたび Shift+Tab で切り替える手間を
   // 省く。"auto" は acceptEdits とは別の独立モード (claude 2.1.x で確認、TUI footer の
-  // 「auto mode on」)。extraArgs で --permission-mode を明示した場合はそちらを尊重。
-  if (!extraArgs.includes('--permission-mode')) {
+  // 「auto mode on」)。extraArgs で --permission-mode を明示した場合はそちらを尊重
+  // (`--permission-mode X` と `--permission-mode=X` の両形式を検知 — `=` 形式を
+  // 見逃すと既定を後置してユーザー指定を上書きしてしまう)。
+  const hasPermissionMode = extraArgs.some(
+    (a) => a === '--permission-mode' || a.startsWith('--permission-mode=')
+  );
+  if (!hasPermissionMode) {
     extraArgs.push('--permission-mode', 'auto');
   }
   port.postMessage({
