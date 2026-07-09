@@ -107,9 +107,12 @@ cargo build --release
 
 **自動レビュー (auto mode) が主モード** (トグル既定 ON、`chrome.storage.local` に永続):
 panel を開いている間、draft PR 一覧 (ci-dashboard webhook-fed) を 60 秒間隔で取得し、
-未レビューの PR を 1 本ずつ無人で `-p` レビュー → コメント投稿まで実行する。済み PR
-(`repo#number` 単位で記録) は auto では再実行しない — 対応後の再レビューは行クリック。
-panel を閉じると止まる (port 切断 = claude kill のゾンビ防止設計のため)。
+未レビューの PR を **terminal モードで自動実行**する (テンプレ自動流し込み + 自動送信、
+`--allowedTools` は対話にも適用)。terminal なので実行過程 (tool 実行と結果) が生で見え、
+コピーすればそのまま CCoW に共有できる。1 PR = 1 terminal セッションで、terminal 終了後に
+次の未レビュー PR を拾う。済み PR (`repo#number` 単位で記録) は auto では再実行しない —
+対応後の再レビューは行クリック。panel を閉じると止まる (port 切断 = claude kill の
+ゾンビ防止設計のため)。
 
 手動フロー: 行をクリックすると、host が repo 管理の
 テンプレ [`host/prompts/review.md`](./host/prompts/review.md) (バイナリに同梱、更新は

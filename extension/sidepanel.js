@@ -158,6 +158,31 @@ setInterval(() => {
   if (autoEl.checked && !termRunning && !pRunning && !autoPendingKey) loadDraftPrs();
 }, 60_000);
 
+// terminal 起動直後に流し込む本文 (claude が bracketed paste を有効化したら送る)。
+let pendingTermPaste = '';
+
+// auto レビューを terminal モードで開始する: term_start (--allowedTools を対話にも
+// 適用) → claude の入力欄準備 (ESC[?2004h) を term_out で検知 → テンプレを bracketed
+// paste で流し込み → Enter を自動送信。1 PR = 1 terminal セッションで、終了
+// (term_exit) 後に次の未レビュー PR を拾う。
+function startAutoTermReview(key, prompt) {
+  const t = ensureTerm();
+  t.reset();
+  const extraArgs = extraArgsEl.value.trim() ? extraArgsEl.value.trim().split(/\s+/) : [];
+  if (reviewAllowedTools.length) {
+    extraArgs.push('--allowedTools', reviewAllowedTools.join(','));
+  }
+  pendingTermPaste = prompt;
+  port.postMessage({
+    cmd: 'term_start',
+    cols: t.cols,
+    rows: t.rows,
+    chrome: chromeEl.checked,
+    extra_args: extraArgs,
+  });
+  setStatus(`自動レビュー (terminal): ${key} を起動中…`);
+}
+
 function renderPrList(prs, updatedAt) {
   lastPrs = prs;
   prListEl.textContent = '';
@@ -505,21 +530,16 @@ function render(msg) {
       reviewAllowedTools = msg.allowed_tools || [];
       const ref = msg.pr ? `${msg.pr.repo}#${msg.pr.number}` : '';
       if (autoPendingKey && ref === autoPendingKey) {
-        // auto mode (#29): テンプレを受けたら Start 押下なしで即 -p 起動する。
+        // auto mode (#29): テンプレを受けたら terminal モードで自動実行する。
+        // -p (timeline) ではなく terminal にするのは実行過程の視認性のため —
+        // tool 実行と結果が生画面で見え、コピーすればそのまま CCoW にも共有できる
+        // (timeline の折りたたみ tool_result はコピーに乗らない)。
         autoPendingKey = '';
         if (termRunning || pRunning) break; // 競合したら次の tick で再試行
-        const extraArgs = beginRun();
         reviewRun = true;
         reviewedPrs[ref] = Date.now();
         chrome.storage.local.set({ reviewedPrs });
-        port.postMessage({
-          cmd: 'start',
-          prompt: p,
-          chrome: chromeEl.checked,
-          extra_args: extraArgs,
-          allowed_tools: reviewAllowedTools,
-        });
-        setStatus(`自動レビュー開始: ${ref}`);
+        startAutoTermReview(ref, p);
         break;
       }
       if (termRunning) {
@@ -599,18 +619,38 @@ function render(msg) {
         .catch((e) => setStatus(`クリップボード書き込み失敗 (${e}) — 下の折りたたみから手動でコピーしてください`));
       break;
     }
-    case 'term_out':
+    case 'term_out': {
       // replay で panel 再オープン時にも描き直せるよう、受信側でも ensure する。
-      ensureTerm().write(b64ToBytes(msg.data || ''));
+      const bytes = b64ToBytes(msg.data || '');
+      ensureTerm().write(bytes);
+      if (pendingTermPaste) {
+        // claude が bracketed paste を有効化 (ESC[?2004h) = 入力欄準備完了の合図。
+        let s = '';
+        for (const b of bytes) s += String.fromCharCode(b);
+        if (s.includes('[?2004h')) {
+          const p = pendingTermPaste;
+          pendingTermPaste = '';
+          port.postMessage({ cmd: 'term_input', data: `\x1b[200~${p}\x1b[201~` });
+          // 送信の Enter は paste の描画が落ち着いてから (即続けると取りこぼす端末がある)。
+          setTimeout(() => {
+            if (termRunning) port.postMessage({ cmd: 'term_input', data: '\r' });
+          }, 500);
+          setStatus('自動レビュー: プロンプトを送信しました — terminal で進行を確認できます');
+        }
+      }
       break;
+    }
     case 'term_exit':
       termRunning = false;
+      pendingTermPaste = '';
       setStatus(`terminal 終了 (code=${msg.code})`);
       add('ev-proc', `terminal 終了 (code=${msg.code})`);
       termKillBtn.hidden = true;
       // 終了した terminal は畳む (死んだ画面を残さない)。出力の遡りは
       // debug コピー (term_exit note に先頭 2KB) で可能。
       termContainer.hidden = true;
+      // auto mode: 次の未レビュー PR を拾う。
+      if (autoEl.checked) setTimeout(loadDraftPrs, 3000);
       break;
     case 'busy':
       // auto の review_prompt → start が競合で弾かれた場合も含め、待ち状態を解除
@@ -633,6 +673,7 @@ function render(msg) {
       pRunning = false;
       termRunning = false;
       autoPendingKey = '';
+      pendingTermPaste = '';
       setStatus(`host 切断${msg.error ? `: ${msg.error}` : ''}`);
       add('ev-error', `host 切断${msg.error ? `: ${msg.error}` : ''}`);
       break;

@@ -54,6 +54,12 @@ pub fn review_allowed_tools() -> Vec<String> {
         "Bash(gh pr diff:*)",
         "Bash(gh pr checks:*)",
         "Bash(gh pr comment:*)",
+        // コメント投稿の優先経路 (ローカル claude に該当 MCP server が構成されて
+        // いる場合のみ実在)。MCP は GitHub App の installation token を使うため
+        // gh CLI (user PAT) の GraphQL rate limit と別枠 — PAT 枯渇時の詰まりを
+        // 回避する (#27 3 周目の実害)。無い環境では単に使われないだけで無害。
+        "mcp__githubmcp__add_issue_comment",
+        "mcp__github__add_issue_comment",
         "Read",
     ]
     .map(String::from)
@@ -186,16 +192,21 @@ mod tests {
     #[test]
     fn allowlist_is_minimal_and_readonly() {
         let tools = review_allowed_tools();
-        // gh pr サブコマンド限定 + Read のみ。丸ごと許可 / write 系は入れない (指摘1, 6)
+        // gh pr サブコマンド限定 + コメント投稿 MCP + Read のみ。
+        // 丸ごと許可 / write 系は入れない (指摘1, 6)
         for t in &tools {
             assert!(
-                t == "Read" || t.starts_with("Bash(gh pr "),
+                t == "Read" || t.starts_with("Bash(gh pr ") || t.ends_with("__add_issue_comment"),
                 "想定外の allowlist entry: {t}"
             );
             assert_ne!(t, "Bash(gh pr:*)", "gh pr 丸ごと許可は禁止");
         }
         assert!(!tools.iter().any(|t| t.contains("gh api")));
         assert!(!tools.iter().any(|t| t == "Edit" || t == "Write"));
+        // MCP はコメント投稿 tool のみ (merge / close / issue_write 系は入れない)
+        assert!(!tools
+            .iter()
+            .any(|t| t.contains("merge") || t.contains("issue_write") || t.contains("update")));
         // --allowedTools は comma join で 1 引数に組むため、rule に comma を含めない
         assert!(!tools.iter().any(|t| t.contains(',')));
     }
