@@ -56,9 +56,10 @@ pub fn parse_pr_info(v: &Value) -> PrInfo {
 /// 引数レベルの制約は #1 のブラウザ系 allowlist 検討と合わせて再検討する。
 pub fn review_allowed_tools() -> Vec<String> {
     [
+        // view はブラウザ確認の対象 URL・既存コメントの取得に必要。
+        // diff / checks は意図的に外している (#32 user 決定: ソースレビューは CCoW の
+        // 仕事で、diff を読めるとソース抽出に注力してしまう。ブラウザ確認専任にする)。
         "Bash(gh pr view:*)",
-        "Bash(gh pr diff:*)",
-        "Bash(gh pr checks:*)",
         "Bash(gh pr comment:*)",
         // コメント投稿の優先経路 (ローカル claude に該当 MCP server が構成されて
         // いる場合のみ実在)。MCP は GitHub App の installation token を使うため
