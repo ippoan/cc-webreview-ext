@@ -433,6 +433,9 @@ function render(msg) {
       setStatus(`terminal 終了 (code=${msg.code})`);
       add('ev-proc', `terminal 終了 (code=${msg.code})`);
       termKillBtn.hidden = true;
+      // 終了した terminal は畳む (死んだ画面を残さない)。出力の遡りは
+      // debug コピー (term_exit note に先頭 2KB) で可能。
+      termContainer.hidden = true;
       break;
     case 'busy':
       setStatus('busy: 既にセッションが走っています (-p / terminal は同時 1 本)');
