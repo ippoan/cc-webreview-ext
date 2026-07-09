@@ -99,6 +99,8 @@ cargo build --release
 対話モードの claude を PTY (Windows: ConPTY) 配下で起動し、xterm.js (同梱 vendor) に
 生画面を流す — 承認プロンプト・`/login`・`/chrome` がそのまま使える。
 
+- **既定で auto mode (`--permission-mode acceptEdits`) 起動** — 開くたびに Shift+Tab で
+  切り替える手間を省く。追加 CLI 引数で `--permission-mode` を明示すればそちらが優先
 - `--chrome` checkbox / 追加 CLI 引数は Terminal 起動にも効く
 - -p セッションと terminal は**同時 1 本** (`busy` で拒否)
 - panel を閉じる / `Term 終了` で claude は kill される (ゾンビを残さない)

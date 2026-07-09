@@ -389,6 +389,11 @@ document.getElementById('termStart').addEventListener('click', () => {
   }
   t.reset();
   const extraArgs = extraArgsEl.value.trim() ? extraArgsEl.value.trim().split(/\s+/) : [];
+  // 既定で auto mode (acceptEdits) で起動する — terminal を開くたび Shift+Tab で
+  // 切り替える手間を省く。extraArgs で --permission-mode を明示した場合はそちらを尊重。
+  if (!extraArgs.includes('--permission-mode')) {
+    extraArgs.push('--permission-mode', 'acceptEdits');
+  }
   port.postMessage({
     cmd: 'term_start',
     cols: t.cols,
@@ -396,7 +401,7 @@ document.getElementById('termStart').addEventListener('click', () => {
     chrome: chromeEl.checked,
     extra_args: extraArgs,
   });
-  setStatus('terminal 起動中…');
+  setStatus('terminal 起動中… (auto mode / acceptEdits)');
   t.focus();
 });
 termKillBtn.addEventListener('click', () => port.postMessage({ cmd: 'term_kill' }));
