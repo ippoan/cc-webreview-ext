@@ -124,6 +124,58 @@ document.getElementById('resume').addEventListener('click', () => {
 });
 document.getElementById('stop').addEventListener('click', () => port.postMessage({ cmd: 'stop' }));
 document.getElementById('ping').addEventListener('click', () => port.postMessage({ cmd: 'ping' }));
+
+// --- Claude in Chrome 接続診断 (#31) ---------------------------------------
+// 「診断」は無料の前提条件チェック (拡張の有無は panel 側、claude の版と token は
+// host の {cmd:"diag"})。「接続プローブ」は browser ツールのみ許可した -p を 1 本
+// 流して headless で実際に繋がるかを確かめる (busy 排他は host に任せる)。
+// 公式 Claude in Chrome 拡張の id。出典: Chrome Web Store の detail URL
+// https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn
+const CLAUDE_IN_CHROME_EXT_ID = 'fcoeoabgfenejglbffodgkkbkcdhcgfn';
+
+document.getElementById('diag').addEventListener('click', async () => {
+  add('ev-proc', '== Claude in Chrome 接続診断 ==');
+  // 1. 公式拡張が「この Chrome プロファイルに」入っているか (management 権限)。
+  //    別プロファイル / 別マシンの拡張はここでは検出できない点も明示する。
+  try {
+    const info = await chrome.management.get(CLAUDE_IN_CHROME_EXT_ID);
+    add(
+      info.enabled ? 'ev-proc' : 'ev-error',
+      `公式拡張: インストール済み v${info.version} / ` +
+        (info.enabled ? '有効' : '無効 — chrome://extensions で有効化してください')
+    );
+  } catch {
+    add(
+      'ev-error',
+      '公式拡張: このプロファイルに未インストール — https://claude.ai/chrome から追加 ' +
+        '(別プロファイル/別マシンに入っている場合ここでは検出できません)'
+    );
+  }
+  // 2. claude のパス・版・認証 token は host 側で確認 ({type:"diag"} で返る)。
+  port.postMessage({ cmd: 'diag' });
+});
+
+document.getElementById('diagProbe').addEventListener('click', () => {
+  if (termRunning || pRunning) {
+    setStatus('実行中のセッションがあります — 終了してからプローブを実行してください');
+    return;
+  }
+  const extraArgs = beginRun();
+  reviewRun = false;
+  port.postMessage({
+    cmd: 'start',
+    prompt:
+      'Claude in Chrome 接続プローブ: (1) いま使えるツール一覧に browser 操作ツール ' +
+      '(mcp__claude-in-chrome 系) があるか確認する (2) あれば接続中のブラウザ/タブを確認する' +
+      '読み取り系ツールを 1 回だけ呼ぶ (3) 結果を「PROBE: PASS — <使えたツール名と確認できた' +
+      'タブ情報>」または「PROBE: FAIL — <理由 (browser ツール無し / 接続エラーの全文)>」の ' +
+      '1 行で報告する。ファイル・Bash・GitHub 操作はしない。',
+    chrome: true, // プローブは常に --chrome (チェックボックスの状態に依存しない)
+    extra_args: extraArgs,
+    allowed_tools: ['mcp__claude-in-chrome'],
+  });
+  setStatus('接続プローブ実行中… (--chrome / browser ツールのみ許可)');
+});
 document.getElementById('debugCopy').addEventListener('click', () => {
   port.postMessage({ cmd: 'debug_dump', limit: 50 });
   setStatus('debug ログ取得中…');
@@ -660,6 +712,39 @@ function render(msg) {
       applyAuthStatus(msg.auth);
       checkAppliedExtVersion(msg.ext_version);
       break;
+    case 'diag': {
+      // 「診断」ボタンの host 側結果 (#31)。値は boolean / 版数のみ (secret 無し)。
+      add(
+        msg.claude_path ? 'ev-proc' : 'ev-error',
+        `claude: ${msg.claude_path || '未解決 — インストール先を registry ClaudeExe か env CC_WEBREVIEW_CLAUDE で指定'}` +
+          (msg.claude_source ? ` (${msg.claude_source})` : '')
+      );
+      if (msg.claude_path) {
+        add(
+          msg.claude_version_ok === false ? 'ev-error' : 'ev-proc',
+          `claude version: ${msg.claude_version ? `v${msg.claude_version}` : '取得失敗'} ` +
+            `(Claude in Chrome 連携は v${msg.min_claude_version}+ が必要` +
+            (msg.claude_version_ok === false ? ' — claude を更新してください' : '') +
+            ')'
+        );
+      }
+      {
+        const a = msg.auth || {};
+        add(
+          a.likely_logged_in ? 'ev-proc' : 'ev-error',
+          `認証: credentials_file=${!!a.credentials_file} / CLAUDE_CODE_OAUTH_TOKEN=${!!a.oauth_token_env}` +
+            (a.likely_logged_in
+              ? ''
+              : ' — claude setup-token → setx CLAUDE_CODE_OAUTH_TOKEN → Chrome 完全再起動')
+        );
+      }
+      add(
+        'ev-proc',
+        '仕上げの確認: 拡張のログインアカウントと claude 側 (token 発行元) アカウントの一致は' +
+          '「接続プローブ」で実地確認してください (不一致だとツールが生えても接続できません)'
+      );
+      break;
+    }
     case 'claude':
       if (consoleRun) renderClaudeEventConsole(msg.data || {});
       else renderClaudeEvent(msg.data || {});

@@ -11,6 +11,7 @@
 
 mod auth;
 mod debuglog;
+mod diag;
 mod nmhost;
 mod register;
 mod review;
@@ -247,11 +248,15 @@ fn run_native_host() {
                     "ext_version": update::applied_extension_tag(),
                 }));
             }
-            HostCommand::Start(start) => {
+            HostCommand::Start(mut start) => {
                 if busy {
                     emit(json!({ "type": "busy" }));
                     continue;
                 }
+                // --chrome の opt-in 時は browser ツールを allowlist に足す (#31)。
+                // 空 (非レビュー手動 prompt) は空のまま = 無制限を維持する。
+                start.allowed_tools =
+                    review::allowlist_with_browser(start.allowed_tools, start.chrome);
                 if let Some(s) = spawn_p_session(start, &writer, &log) {
                     active = Some(s);
                 }
@@ -272,7 +277,11 @@ fn run_native_host() {
                 };
                 // パネル再読み込みで拡張側の allowlist が消えていても resume を
                 // 空振りさせない (レビュー既定の read-only allowlist を補う)。
-                start.allowed_tools = review::allowlist_or_review_default(start.allowed_tools);
+                // その上で --chrome opt-in なら browser ツールも足す (#31)。
+                start.allowed_tools = review::allowlist_with_browser(
+                    review::allowlist_or_review_default(start.allowed_tools),
+                    start.chrome,
+                );
                 start.resume_session_id = Some(sid);
                 if let Some(s) = spawn_p_session(start, &writer, &log) {
                     active = Some(s);
@@ -286,6 +295,13 @@ fn run_native_host() {
                     "allowed_tools": review::review_allowed_tools(),
                     "pr": { "repo": pr.repo, "number": pr.number, "url": pr.url },
                 }));
+            }
+            HostCommand::Diag => {
+                // Claude in Chrome 前提条件の診断 (#31)。claude セッションではないため
+                // busy でも応答してよい。`claude --version` の子プロセスがハング/低速でも
+                // stdio ループ (Stop 等) を塞がないよう、更新チェックと同様 background
+                // thread で実行する (#32 Web Review 指摘1)。
+                spawn_diag(&writer, &log);
             }
             HostCommand::CheckUpdate => {
                 // 手動更新チェック (side panel の「更新確認」ボタン)。結果は
@@ -376,6 +392,39 @@ fn run_native_host() {
         log.note("kill_on_eof", "terminal killed");
         t.kill();
     }
+}
+
+/// 診断 (#31) を background thread で実行して `{type:"diag"}` を送る。
+/// `claude --version` の子プロセスがハング/低速 (ネットワーク共有上の exe 等) でも
+/// stdio ループを塞がないよう thread に逃がす (spawn_update_check と同じ理由・同じ形)。
+fn spawn_diag(writer: &Arc<SharedWriter<io::Stdout>>, log: &Arc<DebugLog>) {
+    let writer = Arc::clone(writer);
+    let log = Arc::clone(log);
+    std::thread::spawn(move || {
+        let resolved = register::resolve_claude_path_with_source();
+        let version_output = resolved.as_ref().and_then(|(p, _)| {
+            let mut cmd = session::command_for(p);
+            cmd.arg("--version");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            cmd.output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        });
+        let path_str = resolved.as_ref().map(|(p, _)| p.display().to_string());
+        let v = diag::diag_json(
+            path_str.as_deref(),
+            resolved.as_ref().map(|(_, s)| *s),
+            version_output.as_deref(),
+            auth::AuthStatus::probe(),
+        );
+        log.log("out", "diag", &v);
+        let _ = writer.send(&v);
+    });
 }
 
 /// 更新チェック (#6) を別スレッドで実行する (stdio ループを塞がない)。

@@ -119,20 +119,27 @@ pub fn install(_claude_path: Option<&Path>, _ext_id: &str) -> Result<String, Str
 /// 2. registry `HKCU\Software\ippoan\cc-webreview` の `ClaudeExe` (Windows)
 /// 3. 既知のインストール先候補 (`%USERPROFILE%\.local\bin\claude.exe` 等)
 pub fn resolve_claude_path() -> Option<PathBuf> {
+    resolve_claude_path_with_source().map(|(p, _)| p)
+}
+
+/// `resolve_claude_path` と同じ優先順で、どの経路で解決したかのラベルも返す
+/// (#31 診断用。side panel の「診断」表示に使う)。
+pub fn resolve_claude_path_with_source() -> Option<(PathBuf, &'static str)> {
     if let Some(p) = std::env::var_os("CC_WEBREVIEW_CLAUDE") {
         let p = PathBuf::from(p);
         if p.is_file() {
-            return Some(p);
+            return Some((p, "env CC_WEBREVIEW_CLAUDE"));
         }
     }
     if let Some(p) = claude_path_from_registry() {
         if p.is_file() {
-            return Some(p);
+            return Some((p, "registry ClaudeExe"));
         }
     }
     default_claude_candidates()
         .into_iter()
         .find(|cand| cand.is_file())
+        .map(|p| (p, "既定のインストール先"))
 }
 
 #[cfg(windows)]

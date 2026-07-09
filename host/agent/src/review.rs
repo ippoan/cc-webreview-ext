@@ -46,8 +46,9 @@ pub fn parse_pr_info(v: &Value) -> PrInfo {
 /// `Bash(gh api *)` / `Bash(gh pr *)` の丸ごと許可は**禁止** — `gh api` は任意の
 /// write API (PUT/POST/DELETE)、`gh pr` は `close` / `merge` を通してしまい、自己参照
 /// レビューで対象 PR を merge/close しうる (docs/plan-review-flow.md 指摘1)。
-/// Edit / Write は付与しない (レビュー専用)。ブラウザ系ツールは #1 spike で
-/// tool_use のツール名サンプルを採取してから追加する (指摘6)。
+/// Edit / Write は付与しない (レビュー専用)。ブラウザ系ツールはこの基本 allowlist には
+/// 含めず、`--chrome` opt-in 時に `allowlist_with_browser` が `BROWSER_TOOL_RULES` を
+/// 追加する (#31)。
 ///
 /// 既知の割り切り (#27 Web Review 5 周目指摘3): コメント投稿の許可は tool 名単位で、
 /// **投稿先の PR/issue 番号までは絞れない** — 未信頼 PR タイトル経由の指示注入と
@@ -55,9 +56,10 @@ pub fn parse_pr_info(v: &Value) -> PrInfo {
 /// 引数レベルの制約は #1 のブラウザ系 allowlist 検討と合わせて再検討する。
 pub fn review_allowed_tools() -> Vec<String> {
     [
+        // view はブラウザ確認の対象 URL・既存コメントの取得に必要。
+        // diff / checks は意図的に外している (#32 user 決定: ソースレビューは CCoW の
+        // 仕事で、diff を読めるとソース抽出に注力してしまう。ブラウザ確認専任にする)。
         "Bash(gh pr view:*)",
-        "Bash(gh pr diff:*)",
-        "Bash(gh pr checks:*)",
         "Bash(gh pr comment:*)",
         // コメント投稿の優先経路 (ローカル claude に該当 MCP server が構成されて
         // いる場合のみ実在)。MCP は GitHub App の installation token を使うため
@@ -69,6 +71,36 @@ pub fn review_allowed_tools() -> Vec<String> {
     ]
     .map(String::from)
     .to_vec()
+}
+
+/// `--chrome` 時にレビュー allowlist へ足す browser ツール rule (#31)。
+///
+/// Claude in Chrome のツールは MCP server **`claude-in-chrome`** として生える
+/// (公式 docs: 「Run `/mcp` and select `claude-in-chrome` to see the full list」、
+/// https://code.claude.com/docs/en/chrome)。個別ツール名は版で増減し公式一覧も
+/// 無いため、server 単位 rule で全ツールを許可する。クリック・入力・遷移を含むが、
+/// user が side panel の `--chrome` チェックで明示 opt-in した時だけ効く。
+/// headless (`-p`) で実際に provision されるかは #1 spike の Windows 実機検証
+/// 項目 — provision されなければ rule は単に使われないだけで無害 (fail-safe)。
+pub const BROWSER_TOOL_RULES: &[&str] = &["mcp__claude-in-chrome"];
+
+/// spawn 直前の最終 allowlist を組む (#31)。
+///
+/// - **空 (非レビューの手動 prompt) は空のまま返す** — `build_claude_args` は空なら
+///   `--allowedTools` 自体を付けず無制限のままにする。ここで browser rule を足すと
+///   逆に「browser のみ許可」へ restrict してしまい手動利用を壊す。
+/// - 非空 (レビュー実行) で `chrome=true` なら browser rule を追加する (重複なし)。
+pub fn allowlist_with_browser(tools: Vec<String>, chrome: bool) -> Vec<String> {
+    if tools.is_empty() || !chrome {
+        return tools;
+    }
+    let mut out = tools;
+    for r in BROWSER_TOOL_RULES {
+        if !out.iter().any(|t| t == r) {
+            out.push((*r).to_string());
+        }
+    }
+    out
 }
 
 /// resume 時に allowlist が空ならレビュー既定を適用する (#27 Web Review 指摘)。
@@ -177,6 +209,11 @@ mod tests {
         assert!(rendered.contains("yhonda-ohishi"));
         // 冪等マーカーと URL 単独行の出力規約がテンプレに含まれること (指摘2, 5)
         assert!(rendered.contains("<!-- web-review -->"));
+        // ブラウザ検証依頼の処理手順 (#31): request 検出 → result 投稿の両 marker と
+        // データ変更禁止の制約がテンプレに含まれること
+        assert!(rendered.contains("<!-- pr-chat-bridge:request -->"));
+        assert!(rendered.contains("<!-- pr-chat-bridge:result -->"));
+        assert!(rendered.contains("データ変更を伴う操作"));
         assert!(rendered.contains("URL 単独の行"));
         // Refs 規約 (auto-close 禁止)
         assert!(rendered.contains("Refs #N"));
@@ -214,6 +251,37 @@ mod tests {
             .any(|t| t.contains("merge") || t.contains("issue_write") || t.contains("update")));
         // --allowedTools は comma join で 1 引数に組むため、rule に comma を含めない
         assert!(!tools.iter().any(|t| t.contains(',')));
+    }
+
+    #[test]
+    fn browser_rules_appended_only_with_chrome() {
+        // chrome=true のレビュー allowlist には browser rule が足される (#31)
+        let with = allowlist_with_browser(review_allowed_tools(), true);
+        for r in BROWSER_TOOL_RULES {
+            assert!(with.iter().any(|t| t == r), "{r} が入っていない");
+        }
+        // 既存の read-only entry はそのまま残る
+        for t in review_allowed_tools() {
+            assert!(with.contains(&t), "{t} が消えた");
+        }
+        // chrome=false なら変化なし
+        assert_eq!(
+            allowlist_with_browser(review_allowed_tools(), false),
+            review_allowed_tools()
+        );
+        // 二重適用しても重複しない (resume 経路で再適用され得る)
+        let twice = allowlist_with_browser(with.clone(), true);
+        assert_eq!(twice, with);
+        // --allowedTools は comma join のため rule に comma を含めない
+        assert!(!BROWSER_TOOL_RULES.iter().any(|r| r.contains(',')));
+    }
+
+    #[test]
+    fn empty_allowlist_stays_unrestricted_with_chrome() {
+        // 非レビューの手動 prompt (allowlist 空 = --allowedTools 無し) に browser rule を
+        // 足すと「browser のみ許可」へ restrict してしまうため、空は空のまま (#31)
+        assert!(allowlist_with_browser(vec![], true).is_empty());
+        assert!(allowlist_with_browser(vec![], false).is_empty());
     }
 
     #[test]
