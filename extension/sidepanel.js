@@ -389,10 +389,11 @@ document.getElementById('termStart').addEventListener('click', () => {
   }
   t.reset();
   const extraArgs = extraArgsEl.value.trim() ? extraArgsEl.value.trim().split(/\s+/) : [];
-  // 既定で auto mode (acceptEdits) で起動する — terminal を開くたび Shift+Tab で
-  // 切り替える手間を省く。extraArgs で --permission-mode を明示した場合はそちらを尊重。
+  // 既定で auto mode で起動する — terminal を開くたび Shift+Tab で切り替える手間を
+  // 省く。"auto" は acceptEdits とは別の独立モード (claude 2.1.x で確認、TUI footer の
+  // 「auto mode on」)。extraArgs で --permission-mode を明示した場合はそちらを尊重。
   if (!extraArgs.includes('--permission-mode')) {
-    extraArgs.push('--permission-mode', 'acceptEdits');
+    extraArgs.push('--permission-mode', 'auto');
   }
   port.postMessage({
     cmd: 'term_start',
@@ -401,7 +402,7 @@ document.getElementById('termStart').addEventListener('click', () => {
     chrome: chromeEl.checked,
     extra_args: extraArgs,
   });
-  setStatus('terminal 起動中… (auto mode / acceptEdits)');
+  setStatus('terminal 起動中… (auto mode)');
   t.focus();
 });
 termKillBtn.addEventListener('click', () => port.postMessage({ cmd: 'term_kill' }));
