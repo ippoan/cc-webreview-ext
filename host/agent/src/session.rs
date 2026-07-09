@@ -63,6 +63,8 @@ pub enum HostCommand {
     TermKill,
     /// debug.sqlite の直近 N 件を返す (--debug-dump の side panel 版、#18 診断導線)。
     DebugDump(i64),
+    /// Claude in Chrome 連携の前提条件診断 (#31)。{type:"diag"} で返す。
+    Diag,
     Unknown(String),
 }
 
@@ -102,6 +104,7 @@ pub fn parse_command(v: &Value) -> HostCommand {
         "start" => HostCommand::Start(parse_start_request(v)),
         "resume" => HostCommand::Resume(parse_start_request(v)),
         "review_prompt" => HostCommand::ReviewPrompt(crate::review::parse_pr_info(v)),
+        "diag" => HostCommand::Diag,
         other => HostCommand::Unknown(other.to_string()),
     }
 }
@@ -391,7 +394,7 @@ fn persist_session_id(sid: &Option<String>, pr_key: Option<&str>) {
 }
 
 /// `.cmd` / `.bat` (npm shim) は直接 spawn できないので cmd /C 経由にする。
-fn command_for(claude: &Path) -> Command {
+pub(crate) fn command_for(claude: &Path) -> Command {
     let ext = claude
         .extension()
         .and_then(|e| e.to_str())
@@ -509,6 +512,11 @@ mod tests {
         assert_eq!(req.prompt, "続きから");
         assert_eq!(req.allowed_tools, vec!["Read"]);
         assert!(req.resume_session_id.is_none());
+    }
+
+    #[test]
+    fn parse_diag_cmd() {
+        assert_eq!(parse_command(&json!({ "cmd": "diag" })), HostCommand::Diag);
     }
 
     #[test]
