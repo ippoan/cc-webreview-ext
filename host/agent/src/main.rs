@@ -13,6 +13,7 @@ mod auth;
 mod debuglog;
 mod nmhost;
 mod register;
+mod review;
 mod session;
 mod term;
 mod update;
@@ -210,6 +211,51 @@ fn run_native_host() {
                         emit(json!({ "type": "error", "error": e }));
                     }
                 }
+            }
+            HostCommand::Resume(mut start) => {
+                // 直近 -p セッションの `--resume` 再実行 (#5 失敗時の導線)。
+                // state はグローバル 1 本 = 直近 1 件のみ (UI 文言でも明示)。
+                if busy {
+                    emit(json!({ "type": "busy" }));
+                    continue;
+                }
+                if start.prompt.trim().is_empty() {
+                    emit(json!({ "type": "error", "error": "prompt が空" }));
+                    continue;
+                }
+                let Some(sid) = session::load_last_session_id() else {
+                    emit(json!({
+                        "type": "error",
+                        "error": "resume できるセッションが無い (直近の -p セッション記録が未作成)",
+                    }));
+                    continue;
+                };
+                let Some(claude) = register::resolve_claude_path() else {
+                    emit(json!({
+                        "type": "error",
+                        "error": "claude が見つからない。--register --claude-path <abs> で設定してください",
+                    }));
+                    continue;
+                };
+                start.resume_session_id = Some(sid);
+                match session::spawn_claude(&claude, &start, &writer, &log) {
+                    Ok(s) => {
+                        emit(json!({ "type": "proc", "event": "spawn" }));
+                        active = Some(s);
+                    }
+                    Err(e) => {
+                        emit(json!({ "type": "error", "error": e }));
+                    }
+                }
+            }
+            HostCommand::ReviewPrompt(pr) => {
+                // テンプレ差し込み (#5)。read-only なので busy でも応答してよい。
+                emit(json!({
+                    "type": "review_prompt",
+                    "prompt": review::render_review_prompt(&pr),
+                    "allowed_tools": review::review_allowed_tools(),
+                    "pr": { "repo": pr.repo, "number": pr.number, "url": pr.url },
+                }));
             }
             HostCommand::CheckUpdate => {
                 // 手動更新チェック (side panel の「更新確認」ボタン)。結果は

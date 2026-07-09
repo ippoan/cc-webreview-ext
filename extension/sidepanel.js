@@ -15,21 +15,52 @@ const port = chrome.runtime.connect({ name: 'panel' });
 port.onMessage.addListener(render);
 port.postMessage({ cmd: 'replay' });
 
+// -p 起動の共通前処理 (start / resume)。タイムラインとセッション状態をリセットする。
+function beginRun() {
+  timeline.textContent = '';
+  lastAssistantText = '';
+  lastCommentUrl = '';
+  // 再実行時はバナーを一旦引っ込め、新セッションで再検知させる。
+  authBannerSticky = false;
+  authBanner.hidden = true;
+  // 追加 CLI 引数 (空白区切り)。空白を含む rule (review allowlist) は
+  // allowed_tools フィールドで別送する (host が --allowedTools 1 引数に組む)。
+  return extraArgsEl.value.trim() ? extraArgsEl.value.trim().split(/\s+/) : [];
+}
+
 document.getElementById('start').addEventListener('click', () => {
   const prompt = promptEl.value.trim();
   if (!prompt) {
     setStatus('prompt を入力してください');
     return;
   }
-  timeline.textContent = '';
-  lastAssistantText = '';
-  // 再実行時はバナーを一旦引っ込め、新セッションで再検知させる。
-  authBannerSticky = false;
-  authBanner.hidden = true;
-  // 追加 CLI 引数 (空白区切り)。-p は対話承認できないため --allowedTools 等を渡す用。
-  const extraArgs = extraArgsEl.value.trim() ? extraArgsEl.value.trim().split(/\s+/) : [];
-  port.postMessage({ cmd: 'start', prompt, chrome: chromeEl.checked, extra_args: extraArgs });
+  const extraArgs = beginRun();
+  reviewRun = reviewAllowedTools.length > 0;
+  port.postMessage({
+    cmd: 'start',
+    prompt,
+    chrome: chromeEl.checked,
+    extra_args: extraArgs,
+    allowed_tools: reviewAllowedTools,
+  });
   setStatus('起動中…');
+});
+// 「続きから」(#5 失敗時の導線): 直近の -p セッションを --resume で再開する。
+// last_session.json はグローバル 1 本 = **resume は直近 1 件のみ** (複数 PR を続けて
+// 回した場合、最後に走った別 PR のセッションを掴む — per-PR resume は後続対応)。
+document.getElementById('resume').addEventListener('click', () => {
+  const extraArgs = beginRun();
+  reviewRun = reviewAllowedTools.length > 0;
+  port.postMessage({
+    cmd: 'resume',
+    prompt:
+      'レビューの続きから再開する。未完了のタスク (特に PR コメント投稿と、最終行への ' +
+      'コメント URL 単独行の出力) を完了してください。',
+    chrome: chromeEl.checked,
+    extra_args: extraArgs,
+    allowed_tools: reviewAllowedTools,
+  });
+  setStatus('直近セッションを resume 中… (resume は直近 1 件のみ)');
 });
 document.getElementById('stop').addEventListener('click', () => port.postMessage({ cmd: 'stop' }));
 document.getElementById('ping').addEventListener('click', () => port.postMessage({ cmd: 'ping' }));
@@ -59,13 +90,21 @@ const CI_DASHBOARD = 'https://ci-dashboard.ippoan.org';
 const prListEl = document.getElementById('prList');
 const prMetaEl = document.getElementById('prMeta');
 
-// 行クリックで prompt に流し込むレビューテンプレ (#5 で本設計するまでの仮)。
-function reviewPrompt(pr) {
-  return [
-    `draft PR ${pr.repo}#${pr.number} をレビューして: ${pr.url}`,
-    'gh pr view / gh pr diff で内容と CI 状態を確認し、必要ならブラウザで PR ページを開いて確認する。',
-    'レビュー結果は PR コメントとして投稿する (指摘リスト + CCoW への引き継ぎチェックリスト)。',
-  ].join('\n');
+// レビューフロー (#5) の状態。テンプレは host が repo 管理の host/prompts/review.md を
+// 差し込んで返す ({cmd:"review_prompt"} → {type:"review_prompt"})。
+// allowlist (read-only gh pr + Read) は応答で受け、start/resume 時に allowed_tools で返す。
+let reviewAllowedTools = [];
+// この run がレビュー実行か (完了時の「コメント URL 未検出」警告の出し分けに使う)。
+let reviewRun = false;
+// gh pr comment の stdout (tool_result) から拾ったコメント URL。第一候補は tool_result、
+// result 本文の URL 単独行はフォールバック (docs/plan-review-flow.md 指摘2)。
+let lastCommentUrl = '';
+const COMMENT_URL_RE = /https:\/\/github\.com\/[^\s"'<>\\)]+#issuecomment-\d+/;
+
+function captureCommentUrl(text) {
+  if (lastCommentUrl || typeof text !== 'string') return;
+  const m = text.match(COMMENT_URL_RE);
+  if (m) lastCommentUrl = m[0];
 }
 
 function renderPrList(prs, updatedAt) {
@@ -93,20 +132,13 @@ function renderPrList(prs, updatedAt) {
     author.textContent = pr.author;
     row.append(ref, title, author);
     row.addEventListener('click', () => {
-      const p = reviewPrompt(pr);
-      if (termRunning) {
-        // terminal 起動中は claude の入力欄へ直接流し込む。bracketed paste
-        // (ESC [200~ … ESC [201~) で包むと複数行でも submit されず 1 ブロックで
-        // 入る (claude は ?2004h を有効化済み)。送信の Enter は user が押す。
-        port.postMessage({ cmd: 'term_input', data: `\x1b[200~${p}\x1b[201~` });
-        if (term) term.focus();
-        setStatus(
-          `${pr.repo}#${pr.number} のレビュープロンプトを terminal に入力しました — Enter で送信`
-        );
-      } else {
-        promptEl.value = p;
-        setStatus(`${pr.repo}#${pr.number} のレビューテンプレを prompt に入れました — Start で開始`);
-      }
+      // テンプレ差し込みは host に依頼し、応答 ({type:"review_prompt"}) 側で
+      // terminal / prompt 欄へ流し込む。
+      port.postMessage({
+        cmd: 'review_prompt',
+        pr: { repo: pr.repo, number: pr.number, url: pr.url, title: pr.title, author: pr.author },
+      });
+      setStatus(`${pr.repo}#${pr.number} のレビューテンプレを取得中…`);
     });
     prListEl.appendChild(row);
   }
@@ -329,6 +361,8 @@ function renderClaudeEvent(data) {
       if (block.type === 'tool_result') {
         const body =
           typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
+        // gh pr comment の stdout はコメント URL を出す — 抽出の第一候補 (指摘2)。
+        captureCommentUrl(String(body));
         addCollapsed('tool_result', String(body).slice(0, 4000));
       }
     }
@@ -338,6 +372,8 @@ function renderClaudeEvent(data) {
     setStatus(`完了 (${data.subtype || 'result'})`);
     const resultText = typeof data.result === 'string' ? data.result : '';
     detectAuthError(resultText);
+    // フォールバック: result 本文の URL 単独行 (テンプレの出力規約) からも拾う。
+    captureCommentUrl(resultText);
     // -p の result 本文は最後の assistant text と同一のことが多い。
     // 直前に描画済みなら result カードでは本文を省略する (2 重表示防止)。
     const isDup = resultText.trim() !== '' && resultText.trim() === lastAssistantText.trim();
@@ -346,7 +382,24 @@ function renderClaudeEvent(data) {
       `session_id: ${data.session_id || '?'}`,
       `cost: $${data.total_cost_usd != null ? data.total_cost_usd : '?'} / turns: ${data.num_turns != null ? data.num_turns : '?'}`,
     ];
-    add('ev-result', lines.join('\n'));
+    const card = add('ev-result', lines.join('\n'));
+    if (lastCommentUrl) {
+      // 完了カードに投稿コメントへのリンクを付ける (指摘2)。
+      const p = document.createElement('div');
+      const a = document.createElement('a');
+      a.href = lastCommentUrl;
+      a.target = '_blank';
+      a.rel = 'noreferrer';
+      a.textContent = `投稿コメント: ${lastCommentUrl}`;
+      p.appendChild(a);
+      card.appendChild(p);
+    } else if (reviewRun) {
+      add(
+        'ev-error',
+        'コメント URL を検出できませんでした — 未投稿の可能性があります。' +
+          '「続きから」で直近セッションを再開できます (resume は直近 1 件のみ)'
+      );
+    }
     return;
   }
   addCollapsed(`event: ${t || '?'}`, JSON.stringify(data, null, 2).slice(0, 4000));
@@ -368,6 +421,27 @@ function render(msg) {
     case 'claude':
       renderClaudeEvent(msg.data || {});
       break;
+    case 'review_prompt': {
+      // host が差し込んだレビューテンプレ (#5)。terminal 起動中は claude の入力欄へ、
+      // それ以外は prompt 欄へ入れる。allowlist は次の Start / 続きから で自動適用。
+      const p = msg.prompt || '';
+      reviewAllowedTools = msg.allowed_tools || [];
+      const ref = msg.pr ? `${msg.pr.repo}#${msg.pr.number}` : '';
+      if (termRunning) {
+        // bracketed paste (ESC [200~ … ESC [201~) で包むと複数行でも submit されず
+        // 1 ブロックで入る (claude は ?2004h を有効化済み)。送信の Enter は user が押す。
+        port.postMessage({ cmd: 'term_input', data: `\x1b[200~${p}\x1b[201~` });
+        if (term) term.focus();
+        setStatus(`${ref} のレビュープロンプトを terminal に入力しました — Enter で送信`);
+      } else {
+        promptEl.value = p;
+        setStatus(
+          `${ref} のレビューテンプレを prompt に入れました — Start で開始 ` +
+            `(read-only allowlist ${reviewAllowedTools.length} 件を自動適用)`
+        );
+      }
+      break;
+    }
     case 'raw':
       detectAuthError(msg.data);
       add('ev-stderr', `raw: ${msg.data}`);
@@ -442,6 +516,9 @@ function render(msg) {
       break;
     case 'error':
       add('ev-error', `error: ${msg.error}`);
+      if (/unknown cmd: (review_prompt|resume)/.test(msg.error || '')) {
+        add('ev-error', 'agent が古い可能性があります — 「更新確認」で agent を更新してください');
+      }
       setStatus('error');
       break;
     case 'host_disconnected':

@@ -18,13 +18,20 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-/// `{cmd:"start"}` の入力。拡張から受けた JSON を検証済みの形に落とす。
-#[derive(Debug, PartialEq)]
+/// `{cmd:"start"}` / `{cmd:"resume"}` の入力。拡張から受けた JSON を検証済みの形に落とす。
+#[derive(Debug, PartialEq, Default)]
 pub struct StartRequest {
     pub prompt: String,
     pub chrome: bool,
     pub extra_args: Vec<String>,
     pub cwd: Option<String>,
+    /// `--allowedTools` に comma join で組む permission rule 群 (#5 レビューフロー)。
+    /// rule は `Bash(gh pr view:*)` のように空白を含むため extra_args (空白 split) では
+    /// 運べず、独立フィールドで受けて argv 1 要素に組む。
+    pub allowed_tools: Vec<String>,
+    /// `--resume <sid>` (#5 失敗時の導線)。拡張からは渡せない — `{cmd:"resume"}` 受信時に
+    /// host が last_session.json から読んで埋める。
+    pub resume_session_id: Option<String>,
 }
 
 /// 拡張 → host の制御メッセージ。
@@ -32,6 +39,10 @@ pub struct StartRequest {
 pub enum HostCommand {
     Ping,
     Start(StartRequest),
+    /// 直近セッションの `--resume` 再実行 (#5)。session_id は host 側で解決する。
+    Resume(StartRequest),
+    /// レビュープロンプトの差し込み要求 (#5)。{type:"review_prompt"} で返す。
+    ReviewPrompt(crate::review::PrInfo),
     Stop,
     /// 手動更新チェック (#6)。結果は {type:"update_status"} で返す。
     CheckUpdate,
@@ -84,36 +95,42 @@ pub fn parse_command(v: &Value) -> HostCommand {
                 .filter(|n| *n > 0 && *n <= 1000)
                 .unwrap_or(50),
         ),
-        "start" => {
-            let prompt = v
-                .get("prompt")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let chrome = v.get("chrome").and_then(Value::as_bool).unwrap_or(false);
-            let extra_args = v
-                .get("extra_args")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let cwd = v
-                .get("cwd")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .filter(|s| !s.is_empty());
-            HostCommand::Start(StartRequest {
-                prompt,
-                chrome,
-                extra_args,
-                cwd,
-            })
-        }
+        "start" => HostCommand::Start(parse_start_request(v)),
+        "resume" => HostCommand::Resume(parse_start_request(v)),
+        "review_prompt" => HostCommand::ReviewPrompt(crate::review::parse_pr_info(v)),
         other => HostCommand::Unknown(other.to_string()),
+    }
+}
+
+/// `start` / `resume` 共通のフィールドを parse する。`resume_session_id` は
+/// 拡張から受け取らない (host が state ファイルから解決する)。
+fn parse_start_request(v: &Value) -> StartRequest {
+    let str_array = |k: &str| -> Vec<String> {
+        v.get(k)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    StartRequest {
+        prompt: v
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        chrome: v.get("chrome").and_then(Value::as_bool).unwrap_or(false),
+        extra_args: str_array("extra_args"),
+        cwd: v
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|s| !s.is_empty()),
+        allowed_tools: str_array("allowed_tools"),
+        resume_session_id: None,
     }
 }
 
@@ -133,6 +150,15 @@ pub fn build_claude_args(req: &StartRequest) -> Vec<String> {
     ];
     if req.chrome {
         args.push("--chrome".to_string());
+    }
+    if let Some(sid) = &req.resume_session_id {
+        args.push("--resume".to_string());
+        args.push(sid.clone());
+    }
+    if !req.allowed_tools.is_empty() {
+        // rule は空白を含む (`Bash(gh pr view:*)`) ため comma join して argv 1 要素で渡す。
+        args.push("--allowedTools".to_string());
+        args.push(req.allowed_tools.join(","));
     }
     args.extend(req.extra_args.iter().cloned());
     args
@@ -285,6 +311,25 @@ pub fn reap_if_exited<W: Write + Send + 'static>(
     }
 }
 
+/// state ファイルから直近 session_id を読む (`{cmd:"resume"}` 用、#5)。
+/// state はグローバル 1 本のため、複数 PR を続けて回すと**直近の別 PR セッション**を
+/// 掴みうる — UI 側で「resume は直近 1 件のみ」と明示する (per-PR map 化は後続)。
+pub fn load_last_session_id() -> Option<String> {
+    let dir = register::data_dir().ok()?;
+    let s = std::fs::read_to_string(dir.join("last_session.json")).ok()?;
+    session_id_from_state_json(&s)
+}
+
+/// last_session.json の中身から session_id を取り出す (純関数)。
+pub fn session_id_from_state_json(s: &str) -> Option<String> {
+    serde_json::from_str::<Value>(s)
+        .ok()?
+        .get("session_id")?
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
+
 /// 直近 session_id を state ファイルに永続化する (`--resume` 用)。best-effort。
 fn persist_session_id(sid: &Option<String>) {
     let Some(sid) = sid else { return };
@@ -321,9 +366,7 @@ mod tests {
     fn start_req(prompt: &str) -> StartRequest {
         StartRequest {
             prompt: prompt.to_string(),
-            chrome: false,
-            extra_args: vec![],
-            cwd: None,
+            ..StartRequest::default()
         }
     }
 
@@ -392,6 +435,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_start_with_allowed_tools() {
+        let v = json!({
+            "cmd": "start",
+            "prompt": "review",
+            "allowed_tools": ["Bash(gh pr view:*)", "Read"],
+        });
+        let HostCommand::Start(req) = parse_command(&v) else {
+            panic!("Start になるはず");
+        };
+        assert_eq!(req.allowed_tools, vec!["Bash(gh pr view:*)", "Read"]);
+        // resume_session_id は拡張から注入できない (host 側でのみ埋まる)
+        assert!(req.resume_session_id.is_none());
+    }
+
+    #[test]
+    fn parse_resume() {
+        let v = json!({
+            "cmd": "resume",
+            "prompt": "続きから",
+            "allowed_tools": ["Read"],
+        });
+        let HostCommand::Resume(req) = parse_command(&v) else {
+            panic!("Resume になるはず");
+        };
+        assert_eq!(req.prompt, "続きから");
+        assert_eq!(req.allowed_tools, vec!["Read"]);
+        assert!(req.resume_session_id.is_none());
+    }
+
+    #[test]
+    fn parse_review_prompt_cmd() {
+        let v = json!({
+            "cmd": "review_prompt",
+            "pr": { "repo": "o/r", "number": 7, "url": "https://github.com/o/r/pull/7" },
+        });
+        let HostCommand::ReviewPrompt(pr) = parse_command(&v) else {
+            panic!("ReviewPrompt になるはず");
+        };
+        assert_eq!(pr.repo, "o/r");
+        assert_eq!(pr.number, 7);
+    }
+
+    #[test]
     fn parse_start_defaults() {
         let HostCommand::Start(req) = parse_command(&json!({ "cmd": "start", "prompt": "x" }))
         else {
@@ -420,6 +506,36 @@ mod tests {
         let args = build_claude_args(&req);
         assert!(args.contains(&"--chrome".to_string()));
         assert_eq!(&args[args.len() - 2..], ["--allowedTools", "Read"]);
+    }
+
+    #[test]
+    fn build_args_with_allowed_tools_joins_into_one_argv() {
+        // rule は空白を含むため comma join した 1 引数で渡す (空白 split に載せない)。
+        let mut req = start_req("review");
+        req.allowed_tools = vec!["Bash(gh pr view:*)".into(), "Read".into()];
+        let args = build_claude_args(&req);
+        let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[i + 1], "Bash(gh pr view:*),Read");
+    }
+
+    #[test]
+    fn build_args_with_resume() {
+        let mut req = start_req("続きから");
+        req.resume_session_id = Some("sid-9".into());
+        let args = build_claude_args(&req);
+        let i = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(args[i + 1], "sid-9");
+    }
+
+    #[test]
+    fn session_id_from_state_json_variants() {
+        assert_eq!(
+            session_id_from_state_json(r#"{"session_id":"abc-1"}"#),
+            Some("abc-1".to_string())
+        );
+        assert_eq!(session_id_from_state_json(r#"{"session_id":""}"#), None);
+        assert_eq!(session_id_from_state_json("{}"), None);
+        assert_eq!(session_id_from_state_json("壊れてる"), None);
     }
 
     #[test]
@@ -457,9 +573,7 @@ mod tests {
         // (argv 渡し時代は cmd /C 分断 + unknown option で壊れた、#4 実機観測)。
         let req = StartRequest {
             prompt: "line1\n- [ ] --chrome を試す".to_string(),
-            chrome: false,
-            extra_args: vec![],
-            cwd: None,
+            ..StartRequest::default()
         };
         // "claude" の代役: stdin (= prompt) を読み切り、JSONL 1 行 + prompt をそのまま
         // echo して終了する sh (prompt round-trip の検証)。

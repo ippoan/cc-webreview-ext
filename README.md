@@ -102,12 +102,41 @@ cargo build --release
 - -p セッションと terminal は**同時 1 本** (`busy` で拒否)
 - panel を閉じる / `Term 終了` で claude は kill される (ゾンビを残さない)
 
+## レビューフロー (#5)
+
+draft PR 一覧 (ci-dashboard webhook-fed) の行をクリックすると、host が repo 管理の
+テンプレ [`host/prompts/review.md`](./host/prompts/review.md) (バイナリに同梱、更新は
+agent self-update に相乗り) に PR 情報を差し込んで返し、prompt 欄 (terminal 起動中は
+claude の入力欄) に入る。`Start` で `-p` レビューが走り、**PR コメント投稿までを完了
+条件**とする。投稿コメントの URL は `gh pr comment` の stdout (`tool_result`) から抽出
+して完了カードにリンク表示する (フォールバック: result 最終行の URL 単独行)。
+
+- **前提: `gh` CLI がインストール済みかつ認証済み (`gh auth login`) であること**。
+  コメント投稿は claude が `gh pr comment` で行う
+- `-p` 実行には read-only の最小 allowlist
+  (`gh pr view/diff/checks/comment` + `Read`) が自動適用される。`gh api` / `gh pr` の
+  丸ごと許可はしない (merge / close / 任意 write API を通さない)。Edit / Write なし
+- 再走しても重複投稿しない: コメント冒頭の `<!-- web-review -->` マーカーを確認し、
+  既存があれば `--edit-last` で更新する (テンプレで規約化)
+- コメント未投稿で終了した場合は「**続きから**」ボタンで直近セッションを
+  `--resume` 再開できる。**resume は直近 1 件のみ** (記録がグローバル 1 本のため、
+  複数 PR を続けて回した場合は最後のセッションだけ)
+- ブラウザ系ツールの allowlist 追加は #1 spike (tool_use ツール名の採取) 後。それまで
+  ブラウザ込みレビューは Terminal モード (対話承認) で行う
+
+CCoW への引き継ぎ: コメントの `## CCoW への引き継ぎ` チェックリストを、対象 PR を
+`subscribe_pr_activity` で watch している CCoW セッションが webhook 起床で処理する
+(検証済みの経路 — docs/plan-review-flow.md 参照)。
+
 ## プロトコル (拡張 ↔ host)
 
-- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}` / `{cmd:"term_start", cols, rows, chrome?, extra_args?, cwd?}` / `{cmd:"term_input", data}` / `{cmd:"term_resize", cols, rows}` / `{cmd:"term_kill"}` / `{cmd:"debug_dump", limit?}`
+- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?, allowed_tools?}` / `{cmd:"resume", prompt, chrome?, extra_args?, cwd?, allowed_tools?}` / `{cmd:"review_prompt", pr:{repo, number, url, title, author}}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}` / `{cmd:"term_start", cols, rows, chrome?, extra_args?, cwd?}` / `{cmd:"term_input", data}` / `{cmd:"term_resize", cols, rows}` / `{cmd:"term_kill"}` / `{cmd:"debug_dump", limit?}`
+- `allowed_tools` は permission rule の配列 (`Bash(gh pr view:*)` 等)。rule は空白を
+  含むため extra_args (空白 split) では運べず、host が `--allowedTools` の 1 引数
+  (comma join) に組む。`resume` の session_id は host が `last_session.json` から解決
 - **prompt は claude の stdin に渡す** (argv 渡しは改行入り prompt が `cmd /C` で分断され、
   `-` 始まりの行が `unknown option` になるため禁止)
-- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"|"term_out"|"term_exit"|"debug_dump"}`。
+- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"|"term_out"|"term_exit"|"debug_dump"|"review_prompt"}`。
   `term_out.data` は base64 (PTY チャンクは UTF-8 多バイト文字を分断し得るため)。
   512KB 超は `{type:"chunk", id, seq, last, data}` に分割 (background.js が再結合)。
 
