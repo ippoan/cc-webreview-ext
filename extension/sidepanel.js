@@ -613,9 +613,14 @@ function render(msg) {
       termContainer.hidden = true;
       break;
     case 'busy':
+      // auto の review_prompt → start が競合で弾かれた場合も含め、待ち状態を解除
+      // して次の tick で再試行できるようにする (固着防止、Web Review 3 周目指摘)。
+      autoPendingKey = '';
       setStatus('busy: 既にセッションが走っています (-p / terminal は同時 1 本)');
       break;
     case 'error':
+      // review_prompt がエラーで返らなかった場合に auto が永久待ちにならないよう解除。
+      autoPendingKey = '';
       add('ev-error', `error: ${msg.error}`);
       if (/unknown cmd: (review_prompt|resume)/.test(msg.error || '')) {
         add('ev-error', 'agent が古い可能性があります — 「更新確認」で agent を更新してください');
@@ -623,10 +628,11 @@ function render(msg) {
       setStatus('error');
       break;
     case 'host_disconnected':
-      // host 死亡 = claude も死んでいる (port 切断で kill)。実行中フラグを戻して
-      // auto mode が固まらないようにする。
+      // host 死亡 = claude も死んでいる (port 切断で kill)。実行中フラグと auto の
+      // 待ち状態を戻して auto mode が固まらないようにする。
       pRunning = false;
       termRunning = false;
+      autoPendingKey = '';
       setStatus(`host 切断${msg.error ? `: ${msg.error}` : ''}`);
       add('ev-error', `host 切断${msg.error ? `: ${msg.error}` : ''}`);
       break;
