@@ -129,7 +129,9 @@ document.getElementById('ping').addEventListener('click', () => port.postMessage
 // 「診断」は無料の前提条件チェック (拡張の有無は panel 側、claude の版と token は
 // host の {cmd:"diag"})。「接続プローブ」は browser ツールのみ許可した -p を 1 本
 // 流して headless で実際に繋がるかを確かめる (busy 排他は host に任せる)。
-const CLAUDE_IN_CHROME_EXT_ID = 'fcoeoabgfenejglbffodgkkbkcdhcgfn'; // 公式 Claude 拡張
+// 公式 Claude in Chrome 拡張の id。出典: Chrome Web Store の detail URL
+// https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn
+const CLAUDE_IN_CHROME_EXT_ID = 'fcoeoabgfenejglbffodgkkbkcdhcgfn';
 
 document.getElementById('diag').addEventListener('click', async () => {
   add('ev-proc', '== Claude in Chrome 接続診断 ==');

@@ -297,29 +297,11 @@ fn run_native_host() {
                 }));
             }
             HostCommand::Diag => {
-                // Claude in Chrome 前提条件の診断 (#31)。`--version` の短命 spawn のみで
-                // claude セッションではないため busy でも応答してよい。
-                let resolved = register::resolve_claude_path_with_source();
-                let version_output = resolved.as_ref().and_then(|(p, _)| {
-                    let mut cmd = session::command_for(p);
-                    cmd.arg("--version");
-                    #[cfg(windows)]
-                    {
-                        use std::os::windows::process::CommandExt;
-                        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                        cmd.creation_flags(CREATE_NO_WINDOW);
-                    }
-                    cmd.output()
-                        .ok()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                });
-                let path_str = resolved.as_ref().map(|(p, _)| p.display().to_string());
-                emit(diag::diag_json(
-                    path_str.as_deref(),
-                    resolved.as_ref().map(|(_, s)| *s),
-                    version_output.as_deref(),
-                    auth::AuthStatus::probe(),
-                ));
+                // Claude in Chrome 前提条件の診断 (#31)。claude セッションではないため
+                // busy でも応答してよい。`claude --version` の子プロセスがハング/低速でも
+                // stdio ループ (Stop 等) を塞がないよう、更新チェックと同様 background
+                // thread で実行する (#32 Web Review 指摘1)。
+                spawn_diag(&writer, &log);
             }
             HostCommand::CheckUpdate => {
                 // 手動更新チェック (side panel の「更新確認」ボタン)。結果は
@@ -410,6 +392,39 @@ fn run_native_host() {
         log.note("kill_on_eof", "terminal killed");
         t.kill();
     }
+}
+
+/// 診断 (#31) を background thread で実行して `{type:"diag"}` を送る。
+/// `claude --version` の子プロセスがハング/低速 (ネットワーク共有上の exe 等) でも
+/// stdio ループを塞がないよう thread に逃がす (spawn_update_check と同じ理由・同じ形)。
+fn spawn_diag(writer: &Arc<SharedWriter<io::Stdout>>, log: &Arc<DebugLog>) {
+    let writer = Arc::clone(writer);
+    let log = Arc::clone(log);
+    std::thread::spawn(move || {
+        let resolved = register::resolve_claude_path_with_source();
+        let version_output = resolved.as_ref().and_then(|(p, _)| {
+            let mut cmd = session::command_for(p);
+            cmd.arg("--version");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            cmd.output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        });
+        let path_str = resolved.as_ref().map(|(p, _)| p.display().to_string());
+        let v = diag::diag_json(
+            path_str.as_deref(),
+            resolved.as_ref().map(|(_, s)| *s),
+            version_output.as_deref(),
+            auth::AuthStatus::probe(),
+        );
+        log.log("out", "diag", &v);
+        let _ = writer.send(&v);
+    });
 }
 
 /// 更新チェック (#6) を別スレッドで実行する (stdio ループを塞がない)。
