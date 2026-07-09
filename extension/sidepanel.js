@@ -57,6 +57,12 @@ document.getElementById('start').addEventListener('click', () => {
 // pr_key (直近にテンプレ取得した PR) を添えると host が per-PR の記録を優先し、
 // 無ければグローバル直近にフォールバックする (取り違え防止、plan 指摘3 後続 (a))。
 document.getElementById('resume').addEventListener('click', () => {
+  // 実行中の誤クリックで xterm のライブ表示を reset() で消さない (Web Review 4 周目
+  // 指摘)。host はどのみち busy で拒否するので、こちらで先に弾いて表示を守る。
+  if (termRunning || pRunning) {
+    setStatus('実行中のセッションがあります — 終了してから「続きから」を使ってください');
+    return;
+  }
   const extraArgs = beginRun();
   // resume はレビュー専用導線: パネル再読み込みで reviewAllowedTools が空でも
   // review 扱いにする (allowlist は host がレビュー既定を補う。#27 Web Review 指摘)。
