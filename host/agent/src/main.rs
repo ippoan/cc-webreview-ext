@@ -189,6 +189,9 @@ fn run_native_host() {
         "claude": claude.as_ref().map(|p| p.display().to_string()),
         // 認証状態 (boolean のみ、secret の値は含まない — #13)
         "auth": auth::AuthStatus::probe().to_json(),
+        // ディスクに適用済みの拡張 tag (ローカル読み取りのみ、API 不使用)。
+        // panel が動作中 version と比較して「リロード待ち」を検出する。
+        "ext_version": update::applied_extension_tag(),
     }));
 
     // 更新チェック (#6) はバックグラウンドで行い、stdio ループを塞がない。
@@ -241,6 +244,7 @@ fn run_native_host() {
                     "running": active.as_mut().map(Session::is_running).unwrap_or(false),
                     // 認証状態 (boolean のみ、secret の値は含まない — #13)
                     "auth": auth::AuthStatus::probe().to_json(),
+                    "ext_version": update::applied_extension_tag(),
                 }));
             }
             HostCommand::Start(start) => {

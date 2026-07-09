@@ -15,10 +15,11 @@ const port = chrome.runtime.connect({ name: 'panel' });
 port.onMessage.addListener(render);
 port.postMessage({ cmd: 'replay' });
 
-// --- 更新確認の自動化 -----------------------------------------------------
-// panel を開いた時に自動で更新確認する (手動ボタンは廃止)。最新なら status のみで
-// 無音、拡張更新が適用された時だけ上部に「拡張をリロード」ボタンを出す。
-// Alt+C の頻繁な開閉で GitHub API (無認証 60 req/h) を撃ち尽くさないよう 10 分 TTL。
+// --- 更新の検出 (手動ボタン廃止) ------------------------------------------
+// 新リリースの発見・適用は host が起動時にバックグラウンドで行う (従来どおり)。
+// panel 側は GitHub API を一切呼ばない — hello / pong の ext_version (ディスクに
+// 適用済みの拡張 tag、.ext-version のローカル読み取り) と動作中の manifest version
+// を比較し、「適用済みだが未リロード」の時だけ上部にリロードボタンを出す。
 const updateActionBtn = document.getElementById('updateAction');
 updateActionBtn.addEventListener('click', () => chrome.runtime.reload());
 
@@ -27,13 +28,20 @@ function markExtReloadReady(tag) {
   updateActionBtn.hidden = false;
 }
 
-chrome.storage.local.get('lastUpdateCheck').then((v) => {
-  const last = v.lastUpdateCheck || 0;
-  if (Date.now() - last > 10 * 60 * 1000) {
-    chrome.storage.local.set({ lastUpdateCheck: Date.now() });
-    port.postMessage({ cmd: 'check_update' });
-  }
-});
+// tag (agent-dev-N / agent-vX.Y.Z) → manifest version 表現 ("0.0.N" / "X.Y.Z")。
+function tagToVersion(tag) {
+  const dev = /^agent-dev-(\d+)$/.exec(tag || '');
+  if (dev) return `0.0.${dev[1]}`;
+  const stable = /^agent-v(\d+\.\d+\.\d+)$/.exec(tag || '');
+  return stable ? stable[1] : '';
+}
+
+// hello / pong の ext_version を動作中 version と突合する (ローカル情報のみ)。
+function checkAppliedExtVersion(tag) {
+  const diskVer = tagToVersion(tag);
+  if (!diskVer) return; // marker 無し (ローカル dev) や未知形式は何もしない
+  if (diskVer !== chrome.runtime.getManifest().version) markExtReloadReady(tag);
+}
 
 // --chrome チェックの永続化 (panel を開くたびに入れ直さなくて良いように)。
 chrome.storage.local.get('chromeFlag').then((v) => {
@@ -643,12 +651,14 @@ function render(msg) {
     case 'hello':
       setStatus(`host v${msg.version} 接続 / claude: ${msg.claude || '未解決'}${authLabel(msg.auth)}`);
       applyAuthStatus(msg.auth);
+      checkAppliedExtVersion(msg.ext_version);
       break;
     case 'pong':
       setStatus(
         `host v${msg.version} / claude: ${msg.claude || '未解決'} / running: ${msg.running}${authLabel(msg.auth)}`
       );
       applyAuthStatus(msg.auth);
+      checkAppliedExtVersion(msg.ext_version);
       break;
     case 'claude':
       if (consoleRun) renderClaudeEventConsole(msg.data || {});

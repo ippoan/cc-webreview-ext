@@ -67,8 +67,11 @@ Claude in Chrome 拡張 v1.0.36+ も。
   (こちらも署名検証必須) で上書きし、side panel **上部に「拡張をリロード」ボタン**を出す
   (`.ext-version` marker で適用済み tag を記録)。
 
-更新確認は **panel を開いた時に自動実行** (10 分 TTL で GitHub API を節約)。手動の
-「更新確認」ボタンは無い — 最新なら status 表示のみ、適用があった時だけボタンが出る。
+手動の「更新確認」ボタンは無い。新リリースの発見・適用は host 起動時の
+バックグラウンドチェックが担い (従来どおり、GitHub API を呼ぶのは host のみ)、
+panel は hello / pong の `ext_version` (ディスクの `.ext-version` のローカル読み取り)
+と動作中の manifest version を突合して、**適用済みだが未リロード**の時だけ上部に
+「拡張をリロード」ボタンを出す — panel 側は GitHub API を一切呼ばない。
 `--chrome` チェックは `chrome.storage.local` に永続化され、開くたびに入れ直す必要はない。
 
 ローカルビルド (tag なし) は自動更新しない (開発中の自分を上書きしない)。

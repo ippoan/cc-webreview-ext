@@ -300,6 +300,18 @@ pub fn pick_latest_extension(releases: &Value) -> Option<(String, String)> {
     best.map(|(_, tag, url)| (tag, url))
 }
 
+/// ディスクに適用済みの拡張 tag (.ext-version) を読む — **GitHub API は使わない**。
+/// hello / pong に載せ、panel が「動作中の拡張が古い = リロード待ち」を
+/// ローカル比較 (動作中 manifest version との突合) だけで判定できるようにする。
+/// 新リリースの発見は従来どおり host 起動時のバックグラウンドチェックが担う。
+pub fn applied_extension_tag() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let marker = exe.parent()?.join("extension").join(".ext-version");
+    let s = std::fs::read_to_string(marker).ok()?;
+    let s = s.trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
 /// install dir の extension\ を最新拡張 zip で更新する。前回 tag は .ext-version に記録。
 /// extension\ が無い (dev / 手動 exe) なら何もしない。
 pub fn update_extension() -> Result<Option<String>, String> {
