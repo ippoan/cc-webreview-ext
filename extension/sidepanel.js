@@ -20,6 +20,8 @@ function beginRun() {
   timeline.textContent = '';
   lastAssistantText = '';
   lastCommentUrl = '';
+  lastSystemRow = null;
+  lastSystemSubtype = '';
   // 再実行時はバナーを一旦引っ込め、新セッションで再検知させる。
   authBannerSticky = false;
   authBanner.hidden = true;
@@ -390,10 +392,34 @@ function toolSummary(block) {
 // 直近の assistant text (result カードの 2 重表示防止に使う)。
 let lastAssistantText = '';
 
+// system イベントの連打 (thinking_tokens 等) で timeline を埋めない:
+// 同一 subtype の連続は 1 行をその場で更新する。
+let lastSystemRow = null;
+let lastSystemSubtype = '';
+
+function addSystemCoalesced(subtype, text) {
+  if (lastSystemRow && lastSystemRow.isConnected && lastSystemSubtype === subtype) {
+    lastSystemRow.textContent = text;
+    return;
+  }
+  lastSystemRow = add('ev-proc', text);
+  lastSystemSubtype = subtype;
+}
+
 function renderClaudeEvent(data) {
   const t = data.type;
-  if (t === 'system' && data.subtype === 'init') {
-    setStatus(`session 開始 (${data.session_id || '?'})`);
+  if (t === 'system') {
+    if (data.subtype === 'init') {
+      setStatus(`session 開始 (${data.session_id || '?'})`);
+      return;
+    }
+    // 思考トークンの進捗カウンタ。行として積まず status を上書きするだけにする
+    // (大量に届くため、積むと timeline が event: system で埋まり何も見えなくなる)。
+    if (data.subtype === 'thinking_tokens') {
+      setStatus(`claude 思考中… (~${data.estimated_tokens != null ? data.estimated_tokens : '?'} tokens)`);
+      return;
+    }
+    addSystemCoalesced(data.subtype || '?', `system: ${data.subtype || '?'}`);
     return;
   }
   if (t === 'assistant') {
