@@ -61,6 +61,15 @@ pub fn data_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "LOCALAPPDATA も HOME も不明".to_string())
 }
 
+/// claude spawn 用の安定 work dir (`data_dir()/work`)。Chrome から継承する cwd は
+/// 起動経路で変わり、claude の trust プロンプトが毎回出る原因になる (#28) —
+/// cwd 未指定の spawn はこの dir に固定する。作成失敗時は None (従来どおり cwd 継承)。
+pub fn default_work_dir() -> Option<PathBuf> {
+    let dir = data_dir().ok()?.join("work");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
 /// manifest を書き、Chrome / Edge の HKCU registry に登録する (Windows)。admin 不要。
 /// `claude_path` を渡した場合は `ClaudeExe` 値にも保存する。
 #[cfg(windows)]

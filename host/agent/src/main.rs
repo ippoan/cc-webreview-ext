@@ -16,6 +16,7 @@ mod register;
 mod review;
 mod session;
 mod term;
+mod trust;
 mod update;
 
 use debuglog::DebugLog;
@@ -61,6 +62,25 @@ fn main() {
         eprintln!("       (Chrome からは native messaging 経由で起動される)");
         std::process::exit(2);
     }
+}
+
+/// cwd 未指定の spawn を安定 work dir に固定し、その dir だけを claude に事前 trust
+/// 登録する (#28 — Chrome 継承 cwd は起動経路で変わり trust プロンプトが毎回出る)。
+/// ユーザーが明示指定した cwd は変更も trust 登録もしない。全て best-effort:
+/// 失敗しても spawn は続行する (trust プロンプトが出るだけ)。
+fn pin_default_cwd(cwd: &mut Option<String>, log: &debuglog::DebugLog) {
+    if cwd.is_some() {
+        return;
+    }
+    let Some(dir) = register::default_work_dir() else {
+        return;
+    };
+    match trust::ensure_trusted(&dir) {
+        Ok(true) => log.note("trust_registered", &dir.display().to_string()),
+        Ok(false) => {}
+        Err(e) => log.note("trust_error", &e),
+    }
+    *cwd = Some(dir.display().to_string());
 }
 
 /// argv が native-host 起動か判定する。Chrome は origin (`chrome-extension://…`) を渡す。
@@ -186,7 +206,7 @@ fn run_native_host() {
                     "auth": auth::AuthStatus::probe().to_json(),
                 }));
             }
-            HostCommand::Start(start) => {
+            HostCommand::Start(mut start) => {
                 if busy {
                     emit(json!({ "type": "busy" }));
                     continue;
@@ -202,6 +222,7 @@ fn run_native_host() {
                     }));
                     continue;
                 };
+                pin_default_cwd(&mut start.cwd, &log);
                 match session::spawn_claude(&claude, &start, &writer, &log) {
                     Ok(s) => {
                         emit(json!({ "type": "proc", "event": "spawn" }));
@@ -241,6 +262,7 @@ fn run_native_host() {
                     continue;
                 };
                 start.resume_session_id = Some(sid);
+                pin_default_cwd(&mut start.cwd, &log);
                 match session::spawn_claude(&claude, &start, &writer, &log) {
                     Ok(s) => {
                         emit(json!({ "type": "proc", "event": "spawn" }));
@@ -265,7 +287,7 @@ fn run_native_host() {
                 // {type:"update_status"} で全件返す (最新でもフィードバックを出す)。
                 spawn_update_check(&writer, &log, true);
             }
-            HostCommand::TermStart(start) => {
+            HostCommand::TermStart(mut start) => {
                 if busy {
                     emit(json!({ "type": "busy" }));
                     continue;
@@ -277,6 +299,7 @@ fn run_native_host() {
                     }));
                     continue;
                 };
+                pin_default_cwd(&mut start.cwd, &log);
                 match term::spawn_terminal(&claude, &start, &writer, &log) {
                     Ok(t) => {
                         emit(json!({ "type": "proc", "event": "term_spawn" }));
