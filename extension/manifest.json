@@ -7,7 +7,8 @@
   "permissions": [
     "nativeMessaging",
     "sidePanel",
-    "clipboardWrite"
+    "clipboardWrite",
+    "storage"
   ],
   "host_permissions": [
     "https://ci-dashboard.ippoan.org/*"

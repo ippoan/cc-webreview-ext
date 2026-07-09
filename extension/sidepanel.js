@@ -109,7 +109,55 @@ function captureCommentUrl(text) {
   if (m) lastCommentUrl = m[0];
 }
 
+// --- 自動レビュー (auto mode, #29) ---------------------------------------
+// panel を開いている間、未レビューの draft PR を自動で -p レビューする (主モード)。
+// 済み記録は chrome.storage.local (repo#number 単位。head SHA が API に無いため
+// push での自動再レビューは対象外 — 再レビューは行クリック)。
+// 同時 1 本規約はそのまま: 実行中は積まず、exit 後の一覧再取得で次を拾う。
+const autoEl = document.getElementById('autoReview');
+let pRunning = false; // -p セッション実行中 (proc spawn/exit で追跡)
+let autoPendingKey = ''; // review_prompt 応答待ちの auto 対象 PR ("repo#number")
+let reviewedPrs = {}; // { "repo#number": epoch_ms }
+let lastPrs = []; // 直近の draft PR 一覧
+
+const prKey = (pr) => `${pr.repo}#${pr.number}`;
+
+chrome.storage.local.get(['autoReview', 'reviewedPrs']).then((v) => {
+  autoEl.checked = v.autoReview !== false; // 既定 ON (auto mode を主とする)
+  reviewedPrs = v.reviewedPrs || {};
+  maybeAutoReview();
+});
+autoEl.addEventListener('change', () => {
+  chrome.storage.local.set({ autoReview: autoEl.checked });
+  if (autoEl.checked) loadDraftPrs();
+});
+
+function maybeAutoReview() {
+  if (!autoEl.checked || termRunning || pRunning || autoPendingKey) return;
+  const next = lastPrs.find((pr) => !reviewedPrs[prKey(pr)]);
+  if (!next) return;
+  autoPendingKey = prKey(next);
+  port.postMessage({
+    cmd: 'review_prompt',
+    pr: {
+      repo: next.repo,
+      number: next.number,
+      url: next.url,
+      title: next.title,
+      author: next.author,
+    },
+  });
+  setStatus(`自動レビュー: ${autoPendingKey} のテンプレ取得中…`);
+}
+
+// auto ON かつ空いている時だけ 60 秒間隔で一覧を再取得する (API を無駄打ちしない。
+// 手動の「一覧更新」は従来どおり)。
+setInterval(() => {
+  if (autoEl.checked && !termRunning && !pRunning && !autoPendingKey) loadDraftPrs();
+}, 60_000);
+
 function renderPrList(prs, updatedAt) {
+  lastPrs = prs;
   prListEl.textContent = '';
   prMetaEl.textContent = updatedAt ? `更新: ${updatedAt}` : '';
   if (!prs.length) {
@@ -144,6 +192,7 @@ function renderPrList(prs, updatedAt) {
     });
     prListEl.appendChild(row);
   }
+  maybeAutoReview();
 }
 
 async function loadDraftPrs() {
@@ -429,6 +478,24 @@ function render(msg) {
       const p = msg.prompt || '';
       reviewAllowedTools = msg.allowed_tools || [];
       const ref = msg.pr ? `${msg.pr.repo}#${msg.pr.number}` : '';
+      if (autoPendingKey && ref === autoPendingKey) {
+        // auto mode (#29): テンプレを受けたら Start 押下なしで即 -p 起動する。
+        autoPendingKey = '';
+        if (termRunning || pRunning) break; // 競合したら次の tick で再試行
+        const extraArgs = beginRun();
+        reviewRun = true;
+        reviewedPrs[ref] = Date.now();
+        chrome.storage.local.set({ reviewedPrs });
+        port.postMessage({
+          cmd: 'start',
+          prompt: p,
+          chrome: chromeEl.checked,
+          extra_args: extraArgs,
+          allowed_tools: reviewAllowedTools,
+        });
+        setStatus(`自動レビュー開始: ${ref}`);
+        break;
+      }
       if (termRunning) {
         // bracketed paste (ESC [200~ … ESC [201~) で包むと複数行でも submit されず
         // 1 ブロックで入る (claude は ?2004h を有効化済み)。送信の Enter は user が押す。
@@ -453,6 +520,12 @@ function render(msg) {
       add('ev-stderr', msg.data);
       break;
     case 'proc':
+      if (msg.event === 'spawn') pRunning = true;
+      if (msg.event === 'exit' || msg.event === 'killed') {
+        pRunning = false;
+        // auto mode: セッション終了後に一覧を再取得して次の未レビュー PR を拾う。
+        if (autoEl.checked) setTimeout(loadDraftPrs, 3000);
+      }
       if (msg.event === 'exit') {
         setStatus(`claude 終了 (code=${msg.code}) session_id=${msg.session_id || '?'}`);
       }
@@ -524,6 +597,10 @@ function render(msg) {
       setStatus('error');
       break;
     case 'host_disconnected':
+      // host 死亡 = claude も死んでいる (port 切断で kill)。実行中フラグを戻して
+      // auto mode が固まらないようにする。
+      pRunning = false;
+      termRunning = false;
       setStatus(`host 切断${msg.error ? `: ${msg.error}` : ''}`);
       add('ev-error', `host 切断${msg.error ? `: ${msg.error}` : ''}`);
       break;

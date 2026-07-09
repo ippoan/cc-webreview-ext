@@ -105,7 +105,13 @@ cargo build --release
 
 ## レビューフロー (#5)
 
-draft PR 一覧 (ci-dashboard webhook-fed) の行をクリックすると、host が repo 管理の
+**自動レビュー (auto mode) が主モード** (トグル既定 ON、`chrome.storage.local` に永続):
+panel を開いている間、draft PR 一覧 (ci-dashboard webhook-fed) を 60 秒間隔で取得し、
+未レビューの PR を 1 本ずつ無人で `-p` レビュー → コメント投稿まで実行する。済み PR
+(`repo#number` 単位で記録) は auto では再実行しない — 対応後の再レビューは行クリック。
+panel を閉じると止まる (port 切断 = claude kill のゾンビ防止設計のため)。
+
+手動フロー: 行をクリックすると、host が repo 管理の
 テンプレ [`host/prompts/review.md`](./host/prompts/review.md) (バイナリに同梱、更新は
 agent self-update に相乗り) に PR 情報を差し込んで返し、prompt 欄 (terminal 起動中は
 claude の入力欄) に入る。`Start` で `-p` レビューが走り、**PR コメント投稿までを完了
