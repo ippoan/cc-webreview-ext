@@ -13,8 +13,10 @@ mod auth;
 mod debuglog;
 mod nmhost;
 mod register;
+mod review;
 mod session;
 mod term;
+mod trust;
 mod update;
 
 use debuglog::DebugLog;
@@ -59,6 +61,62 @@ fn main() {
         eprintln!("       cc-webreview-agent --debug-dump [N]");
         eprintln!("       (Chrome からは native messaging 経由で起動される)");
         std::process::exit(2);
+    }
+}
+
+/// cwd 未指定の spawn を安定 work dir に固定し、その dir だけを claude に事前 trust
+/// 登録する (#28 — Chrome 継承 cwd は起動経路で変わり trust プロンプトが毎回出る)。
+/// ユーザーが明示指定した cwd は変更も trust 登録もしない。全て best-effort:
+/// 失敗しても spawn は続行する (trust プロンプトが出るだけ)。
+fn pin_default_cwd(cwd: &mut Option<String>, log: &debuglog::DebugLog) {
+    if cwd.is_some() {
+        return;
+    }
+    let Some(dir) = register::default_work_dir() else {
+        return;
+    };
+    match trust::ensure_trusted(&dir) {
+        Ok(true) => log.note("trust_registered", &dir.display().to_string()),
+        Ok(false) => {}
+        Err(e) => log.note("trust_error", &e),
+    }
+    *cwd = Some(dir.display().to_string());
+}
+
+/// start / resume 共通の -p spawn: prompt 検証 → claude 解決 → cwd 固定 → spawn → 通知。
+/// busy チェックだけは呼び出し側 (active / term 両方の状態が要るため)。
+/// 成功時 Some(Session)、失敗時は {type:"error"} を emit して None (Web Review 5 周目
+/// 指摘 — Start/Resume の骨格重複が片側だけ直される乖離リスクの解消)。
+fn spawn_p_session(
+    mut start: session::StartRequest,
+    writer: &Arc<SharedWriter<io::Stdout>>,
+    log: &Arc<DebugLog>,
+) -> Option<session::Session> {
+    let emit = |v: serde_json::Value| {
+        log.log("out", v["type"].as_str().unwrap_or("?"), &v);
+        let _ = writer.send(&v);
+    };
+    if start.prompt.trim().is_empty() {
+        emit(json!({ "type": "error", "error": "prompt が空" }));
+        return None;
+    }
+    let Some(claude) = register::resolve_claude_path() else {
+        emit(json!({
+            "type": "error",
+            "error": "claude が見つからない。--register --claude-path <abs> で設定してください",
+        }));
+        return None;
+    };
+    pin_default_cwd(&mut start.cwd, log);
+    match session::spawn_claude(&claude, &start, writer, log) {
+        Ok(s) => {
+            emit(json!({ "type": "proc", "event": "spawn" }));
+            Some(s)
+        }
+        Err(e) => {
+            emit(json!({ "type": "error", "error": e }));
+            None
+        }
     }
 }
 
@@ -131,6 +189,9 @@ fn run_native_host() {
         "claude": claude.as_ref().map(|p| p.display().to_string()),
         // 認証状態 (boolean のみ、secret の値は含まない — #13)
         "auth": auth::AuthStatus::probe().to_json(),
+        // ディスクに適用済みの拡張 tag (ローカル読み取りのみ、API 不使用)。
+        // panel が動作中 version と比較して「リロード待ち」を検出する。
+        "ext_version": update::applied_extension_tag(),
     }));
 
     // 更新チェック (#6) はバックグラウンドで行い、stdio ループを塞がない。
@@ -183,6 +244,7 @@ fn run_native_host() {
                     "running": active.as_mut().map(Session::is_running).unwrap_or(false),
                     // 認証状態 (boolean のみ、secret の値は含まない — #13)
                     "auth": auth::AuthStatus::probe().to_json(),
+                    "ext_version": update::applied_extension_tag(),
                 }));
             }
             HostCommand::Start(start) => {
@@ -190,33 +252,47 @@ fn run_native_host() {
                     emit(json!({ "type": "busy" }));
                     continue;
                 }
-                if start.prompt.trim().is_empty() {
-                    emit(json!({ "type": "error", "error": "prompt が空" }));
+                if let Some(s) = spawn_p_session(start, &writer, &log) {
+                    active = Some(s);
+                }
+            }
+            HostCommand::Resume(mut start) => {
+                // 直近 -p セッションの `--resume` 再実行 (#5 失敗時の導線)。
+                if busy {
+                    emit(json!({ "type": "busy" }));
                     continue;
                 }
-                let Some(claude) = register::resolve_claude_path() else {
+                // pr_key があれば per-PR の記録を優先、無ければグローバル直近 (#5 後続 (a))。
+                let Some(sid) = session::load_session_id_for(start.pr_key.as_deref()) else {
                     emit(json!({
                         "type": "error",
-                        "error": "claude が見つからない。--register --claude-path <abs> で設定してください",
+                        "error": "resume できるセッションが無い (直近の -p セッション記録が未作成)",
                     }));
                     continue;
                 };
-                match session::spawn_claude(&claude, &start, &writer, &log) {
-                    Ok(s) => {
-                        emit(json!({ "type": "proc", "event": "spawn" }));
-                        active = Some(s);
-                    }
-                    Err(e) => {
-                        emit(json!({ "type": "error", "error": e }));
-                    }
+                // パネル再読み込みで拡張側の allowlist が消えていても resume を
+                // 空振りさせない (レビュー既定の read-only allowlist を補う)。
+                start.allowed_tools = review::allowlist_or_review_default(start.allowed_tools);
+                start.resume_session_id = Some(sid);
+                if let Some(s) = spawn_p_session(start, &writer, &log) {
+                    active = Some(s);
                 }
+            }
+            HostCommand::ReviewPrompt(pr) => {
+                // テンプレ差し込み (#5)。read-only なので busy でも応答してよい。
+                emit(json!({
+                    "type": "review_prompt",
+                    "prompt": review::render_review_prompt(&pr),
+                    "allowed_tools": review::review_allowed_tools(),
+                    "pr": { "repo": pr.repo, "number": pr.number, "url": pr.url },
+                }));
             }
             HostCommand::CheckUpdate => {
                 // 手動更新チェック (side panel の「更新確認」ボタン)。結果は
                 // {type:"update_status"} で全件返す (最新でもフィードバックを出す)。
                 spawn_update_check(&writer, &log, true);
             }
-            HostCommand::TermStart(start) => {
+            HostCommand::TermStart(mut start) => {
                 if busy {
                     emit(json!({ "type": "busy" }));
                     continue;
@@ -228,6 +304,7 @@ fn run_native_host() {
                     }));
                     continue;
                 };
+                pin_default_cwd(&mut start.cwd, &log);
                 match term::spawn_terminal(&claude, &start, &writer, &log) {
                     Ok(t) => {
                         emit(json!({ "type": "proc", "event": "term_spawn" }));

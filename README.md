@@ -64,8 +64,15 @@ Claude in Chrome 拡張 v1.0.36+ も。
   `cc-webreview-agent-<tag>-x86_64-pc-windows-msvc.zip` を DL → **minisign 署名検証**
   (`.minisig`、公開鍵は update.rs にハードコード) → `self_replace`。**次回起動から反映**。
 - **同梱拡張**: install dir の `extension\` を最新の `cc-webreview-extension-<tag>.zip`
-  (こちらも署名検証必須) で上書きし、side panel に「リロードで反映」を通知
+  (こちらも署名検証必須) で上書きし、side panel **上部に「拡張をリロード」ボタン**を出す
   (`.ext-version` marker で適用済み tag を記録)。
+
+手動の「更新確認」ボタンは無い。新リリースの発見・適用は host 起動時の
+バックグラウンドチェックが担い (従来どおり、GitHub API を呼ぶのは host のみ)、
+panel は hello / pong の `ext_version` (ディスクの `.ext-version` のローカル読み取り)
+と動作中の manifest version を突合して、**適用済みだが未リロード**の時だけ上部に
+「拡張をリロード」ボタンを出す — panel 側は GitHub API を一切呼ばない。
+`--chrome` チェックは `chrome.storage.local` に永続化され、開くたびに入れ直す必要はない。
 
 ローカルビルド (tag なし) は自動更新しない (開発中の自分を上書きしない)。
 署名の秘密鍵は org secret `MINISIGN_SECRET_KEY` (cdp-relay と共用)、release workflow
@@ -91,6 +98,7 @@ cargo build --release
 | `401 Invalid authentication credentials` / `Not logged in` | まず claude を最新化 (旧版は未ログインでも 401 を出す)。`/login` が通らない場合は `claude setup-token` → `setx CLAUDE_CODE_OAUTH_TOKEN "<token>"` → `taskkill /IM chrome.exe /F` → Chrome 起動し直し (詳細: [docs/spike-claude-chrome.md](./docs/spike-claude-chrome.md)、経緯: #11) |
 | 何が起きたか分からない | `cc-webreview-agent.exe --debug-dump 200` — host を通った全イベント (制御 msg / stream-json / stderr / proc) が `%LOCALAPPDATA%\cc-webreview\debug.sqlite` に残っている。sqlite3 で直接 `SELECT * FROM events` も可 |
 | busy と言われる | 既に claude セッションが走っている。`Stop` してから再実行 |
+| 起動のたびに trust プロンプト (`Do you trust the files in this folder?`) が出る | agent を最新化する。host は cwd 未指定の起動を専用 work dir (`%LOCALAPPDATA%\cc-webreview\work`) に固定し、その dir だけを `~/.claude.json` に事前 trust 登録する (#28)。cwd を明示指定した場合は対象外 (勝手に trust しない) |
 
 ## ターミナルモード
 
@@ -98,16 +106,61 @@ cargo build --release
 対話モードの claude を PTY (Windows: ConPTY) 配下で起動し、xterm.js (同梱 vendor) に
 生画面を流す — 承認プロンプト・`/login`・`/chrome` がそのまま使える。
 
+- **既定で auto mode (`--permission-mode auto`) 起動** — 開くたびに Shift+Tab で
+  切り替える手間を省く (`auto` は `acceptEdits` とは別の独立モード)。追加 CLI 引数で
+  `--permission-mode` を明示すればそちらが優先
 - `--chrome` checkbox / 追加 CLI 引数は Terminal 起動にも効く
 - -p セッションと terminal は**同時 1 本** (`busy` で拒否)
 - panel を閉じる / `Term 終了` で claude は kill される (ゾンビを残さない)
 
+## レビューフロー (#5)
+
+**自動レビュー (auto mode) が主モード** (トグル既定 ON、`chrome.storage.local` に永続):
+panel を開いている間、draft PR 一覧 (ci-dashboard webhook-fed) を 60 秒間隔で取得し、
+未レビューの PR を **`-p` + コンソール描画**で自動実行する — stream-json イベントを
+xterm に terminal 風のテキストとして描くため、実行過程 (tool 実行と結果の全文) が生で
+見え、コピーすればそのまま CCoW に共有できる。対話 terminal で自動実行しないのは、
+interactive claude がレビュー完了後も自然終了せず「1 PR 終了 → 次へ」の queue が
+進まないため (`-p` は exit / result が構造イベントで確定し、URL 抽出・完了検知・queue
+前進が確実に動く)。1 本終わるごとに次の未レビュー PR を拾う。済み PR (`repo#number`
+単位で記録) は auto では再実行しない — 対応後の再レビューは行クリック。panel を
+閉じると止まる (port 切断 = claude kill のゾンビ防止設計のため)。
+
+手動フロー: 行をクリックすると、host が repo 管理の
+テンプレ [`host/prompts/review.md`](./host/prompts/review.md) (バイナリに同梱、更新は
+agent self-update に相乗り) に PR 情報を差し込んで返し、prompt 欄 (terminal 起動中は
+claude の入力欄) に入る。`Start` で `-p` レビューが走り、**PR コメント投稿までを完了
+条件**とする。投稿コメントの URL は `gh pr comment` の stdout (`tool_result`) から抽出
+して完了カードにリンク表示する (フォールバック: result 最終行の URL 単独行)。
+
+- **前提: `gh` CLI がインストール済みかつ認証済み (`gh auth login`) であること**。
+  コメント投稿は claude が `gh pr comment` で行う
+- `-p` 実行には read-only の最小 allowlist
+  (`gh pr view/diff/checks/comment` + `Read`) が自動適用される。`gh api` / `gh pr` の
+  丸ごと許可はしない (merge / close / 任意 write API を通さない)。Edit / Write なし
+- 再走しても重複投稿しない: コメント冒頭の `<!-- web-review -->` マーカーを確認し、
+  既存があれば `--edit-last` で更新する (テンプレで規約化)
+- コメント未投稿で終了した場合は「**続きから**」ボタンで `--resume` 再開できる。
+  レビュー起動時に `pr_key` ("repo#number") を session_id と紐付けて永続化するため、
+  **直近にテンプレ取得した PR の記録を優先して resume** し、無ければグローバル直近に
+  フォールバックする (取り違え防止)。パネル再読み込みで拡張側の allowlist が消えて
+  いても、resume は host がレビュー既定 (read-only) を補う
+- ブラウザ系ツールの allowlist 追加は #1 spike (tool_use ツール名の採取) 後。それまで
+  ブラウザ込みレビューは Terminal モード (対話承認) で行う
+
+CCoW への引き継ぎ: コメントの `## CCoW への引き継ぎ` チェックリストを、対象 PR を
+`subscribe_pr_activity` で watch している CCoW セッションが webhook 起床で処理する
+(検証済みの経路 — docs/plan-review-flow.md 参照)。
+
 ## プロトコル (拡張 ↔ host)
 
-- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}` / `{cmd:"term_start", cols, rows, chrome?, extra_args?, cwd?}` / `{cmd:"term_input", data}` / `{cmd:"term_resize", cols, rows}` / `{cmd:"term_kill"}` / `{cmd:"debug_dump", limit?}`
+- 拡張 → host: `{cmd:"start", prompt, chrome?, extra_args?, cwd?, allowed_tools?, pr_key?}` / `{cmd:"resume", prompt, chrome?, extra_args?, cwd?, allowed_tools?, pr_key?}` / `{cmd:"review_prompt", pr:{repo, number, url, title, author}}` / `{cmd:"stop"}` / `{cmd:"ping"}` / `{cmd:"check_update"}` / `{cmd:"term_start", cols, rows, chrome?, extra_args?, cwd?}` / `{cmd:"term_input", data}` / `{cmd:"term_resize", cols, rows}` / `{cmd:"term_kill"}` / `{cmd:"debug_dump", limit?}`
+- `allowed_tools` は permission rule の配列 (`Bash(gh pr view:*)` 等)。rule は空白を
+  含むため extra_args (空白 split) では運べず、host が `--allowedTools` の 1 引数
+  (comma join) に組む。`resume` の session_id は host が `last_session.json` (`{session_id, sessions:{pr_key: sid}}`) から解決 — `pr_key` 一致を優先、無ければ直近
 - **prompt は claude の stdin に渡す** (argv 渡しは改行入り prompt が `cmd /C` で分断され、
   `-` 始まりの行が `unknown option` になるため禁止)
-- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"|"term_out"|"term_exit"|"debug_dump"}`。
+- host → 拡張: `{type:"hello"|"pong"|"claude"|"raw"|"stderr"|"proc"|"busy"|"error"|"update"|"update_status"|"term_out"|"term_exit"|"debug_dump"|"review_prompt"}`。
   `term_out.data` は base64 (PTY チャンクは UTF-8 多バイト文字を分断し得るため)。
   512KB 超は `{type:"chunk", id, seq, last, data}` に分割 (background.js が再結合)。
 

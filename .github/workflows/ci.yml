@@ -48,12 +48,14 @@ jobs:
   # dev release は PR の CI から出す (main merge 後に再ビルドしない = build は 1 回)。
   # tag `agent-dev-<run_number>` (単調増加) の prerelease を PR head に打ち、
   # MSI + 拡張 zip を添付する。fork PR は token 権限が無いので同一 repo 限定。
+  # draft PR でも出す (web-review-flow の draft レビュー運用では、レビュー中の
+  # 実機確認にこそ dev build が要る。self-update が draft build を拾うのは
+  # 従来の non-draft PR build と同じ割り切り)。auto-merge の draft gate は残す。
   dev-release:
     name: Dev Release (MSI)
     needs: [rust, extension]
     if: >-
       github.event_name == 'pull_request' &&
-      github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository
     uses: ./.github/workflows/release.yml
     permissions:
