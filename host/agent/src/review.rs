@@ -48,6 +48,11 @@ pub fn parse_pr_info(v: &Value) -> PrInfo {
 /// レビューで対象 PR を merge/close しうる (docs/plan-review-flow.md 指摘1)。
 /// Edit / Write は付与しない (レビュー専用)。ブラウザ系ツールは #1 spike で
 /// tool_use のツール名サンプルを採取してから追加する (指摘6)。
+///
+/// 既知の割り切り (#27 Web Review 5 周目指摘3): コメント投稿の許可は tool 名単位で、
+/// **投稿先の PR/issue 番号までは絞れない** — 未信頼 PR タイトル経由の指示注入と
+/// 組み合わせると対象外 PR へのスパム投稿は理論上可能 (merge/close は不可能)。
+/// 引数レベルの制約は #1 のブラウザ系 allowlist 検討と合わせて再検討する。
 pub fn review_allowed_tools() -> Vec<String> {
     [
         "Bash(gh pr view:*)",

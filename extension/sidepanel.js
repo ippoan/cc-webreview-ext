@@ -15,6 +15,34 @@ const port = chrome.runtime.connect({ name: 'panel' });
 port.onMessage.addListener(render);
 port.postMessage({ cmd: 'replay' });
 
+// --- 更新確認の自動化 -----------------------------------------------------
+// panel を開いた時に自動で更新確認する (手動ボタンは廃止)。最新なら status のみで
+// 無音、拡張更新が適用された時だけ上部に「拡張をリロード」ボタンを出す。
+// Alt+C の頻繁な開閉で GitHub API (無認証 60 req/h) を撃ち尽くさないよう 10 分 TTL。
+const updateActionBtn = document.getElementById('updateAction');
+updateActionBtn.addEventListener('click', () => chrome.runtime.reload());
+
+function markExtReloadReady(tag) {
+  updateActionBtn.textContent = `拡張をリロード (${tag})`;
+  updateActionBtn.hidden = false;
+}
+
+chrome.storage.local.get('lastUpdateCheck').then((v) => {
+  const last = v.lastUpdateCheck || 0;
+  if (Date.now() - last > 10 * 60 * 1000) {
+    chrome.storage.local.set({ lastUpdateCheck: Date.now() });
+    port.postMessage({ cmd: 'check_update' });
+  }
+});
+
+// --chrome チェックの永続化 (panel を開くたびに入れ直さなくて良いように)。
+chrome.storage.local.get('chromeFlag').then((v) => {
+  chromeEl.checked = !!v.chromeFlag;
+});
+chromeEl.addEventListener('change', () =>
+  chrome.storage.local.set({ chromeFlag: chromeEl.checked })
+);
+
 // -p 起動の共通前処理 (start / resume)。タイムラインとセッション状態をリセットする。
 function beginRun() {
   timeline.textContent = '';
@@ -88,10 +116,6 @@ document.getElementById('resume').addEventListener('click', () => {
 });
 document.getElementById('stop').addEventListener('click', () => port.postMessage({ cmd: 'stop' }));
 document.getElementById('ping').addEventListener('click', () => port.postMessage({ cmd: 'ping' }));
-document.getElementById('checkUpdate').addEventListener('click', () => {
-  port.postMessage({ cmd: 'check_update' });
-  setStatus('更新確認中…');
-});
 document.getElementById('debugCopy').addEventListener('click', () => {
   port.postMessage({ cmd: 'debug_dump', limit: 50 });
   setStatus('debug ログ取得中…');
@@ -144,6 +168,18 @@ let pRunning = false; // -p セッション実行中 (proc spawn/exit で追跡)
 let autoPendingKey = ''; // review_prompt 応答待ちの auto 対象 PR ("repo#number")
 let reviewedPrs = {}; // { "repo#number": epoch_ms }
 let lastPrs = []; // 直近の draft PR 一覧
+// start 送信済みだが spawn 未確認の auto 既読マーク。busy / error で start が
+// 失敗した場合にロールバックする (spawn 確認で確定) — 失敗した PR が「済み」の
+// まま auto の対象から永久に外れないように (Web Review 5 周目指摘)。
+let autoMarkedKey = '';
+
+function rollbackAutoMark() {
+  if (!autoMarkedKey) return;
+  delete reviewedPrs[autoMarkedKey];
+  chrome.storage.local.set({ reviewedPrs });
+  setStatus(`自動レビュー起動失敗: ${autoMarkedKey} の既読マークを取り消しました (次の tick で再試行)`);
+  autoMarkedKey = '';
+}
 
 const prKey = (pr) => `${pr.repo}#${pr.number}`;
 
@@ -480,19 +516,12 @@ function add(cls, text) {
   return div;
 }
 
-// 拡張が更新された時の通知行 (リロードボタン付き)。runtime.reload() は SW ごと
-// 再起動するので side panel も一旦閉じる — セッションが走っていない時に押す想定。
+// 拡張更新が適用された時の処理: 上部の「拡張をリロード」ボタンを出す (通知行も残す)。
+// runtime.reload() は SW ごと再起動するので side panel も一旦閉じる —
+// セッションが走っていない時に押す想定。
 function addExtUpdated(tag) {
-  const div = document.createElement('div');
-  div.className = 'ev ev-proc';
-  div.textContent = `拡張を ${tag} に更新しました → `;
-  const btn = document.createElement('button');
-  btn.textContent = '拡張をリロード';
-  btn.title = '拡張をリロードして新版を反映する (side panel は一旦閉じる。実行中セッションがあれば終了する)';
-  btn.addEventListener('click', () => chrome.runtime.reload());
-  div.appendChild(btn);
-  timeline.appendChild(div);
-  div.scrollIntoView({ block: 'nearest' });
+  markExtReloadReady(tag);
+  add('ev-proc', `拡張を ${tag} に更新しました — 上部の「拡張をリロード」で反映`);
 }
 
 function addCollapsed(summaryText, bodyText) {
@@ -640,6 +669,7 @@ function render(msg) {
         reviewRun = true;
         reviewedPrs[ref] = Date.now();
         chrome.storage.local.set({ reviewedPrs });
+        autoMarkedKey = ref; // spawn 確認まで暫定 (busy/error でロールバック)
         startAutoConsoleReview(ref, p);
         break;
       }
@@ -669,7 +699,10 @@ function render(msg) {
       else add('ev-stderr', msg.data);
       break;
     case 'proc':
-      if (msg.event === 'spawn') pRunning = true;
+      if (msg.event === 'spawn') {
+        pRunning = true;
+        autoMarkedKey = ''; // 起動成功 — auto 既読マークを確定
+      }
       if (msg.event === 'exit' || msg.event === 'killed') {
         pRunning = false;
         if (consoleRun) {
@@ -695,23 +728,27 @@ function render(msg) {
       }
       break;
     case 'update_status': {
-      // 「更新確認」ボタンの結果 (最新でもフィードバックを出す)。
+      // panel open 時の自動更新確認の結果。最新 / 対象外は status のみで無音にする
+      // (毎回走るため timeline を汚さない)。適用・失敗だけ行を出す。
       const who = msg.component === 'extension' ? '拡張' : 'agent';
       if (msg.status === 'applied' && msg.component === 'extension') {
         addExtUpdated(msg.tag);
-        setStatus('更新確認完了');
+        setStatus(`拡張を ${msg.tag} に更新しました — 上部の「拡張をリロード」で反映`);
         break;
       }
-      const text =
-        msg.status === 'applied'
-          ? `agent を ${msg.tag} に更新しました (次回の起動から反映されます)`
-          : msg.status === 'up_to_date'
-            ? `${who} は最新です`
-            : msg.status === 'dev_build'
-              ? 'ローカルビルドのため自動更新の対象外です'
-              : `${who} の更新確認に失敗: ${msg.error || '?'}`;
-      add(msg.status === 'error' ? 'ev-error' : 'ev-proc', text);
-      setStatus('更新確認完了');
+      if (msg.status === 'applied') {
+        add('ev-proc', `agent を ${msg.tag} に更新しました (次回の起動から反映されます)`);
+        setStatus('agent 更新適用 (次回起動反映)');
+        break;
+      }
+      if (msg.status === 'error') {
+        add('ev-error', `${who} の更新確認に失敗: ${msg.error || '?'}`);
+        setStatus('更新確認失敗');
+        break;
+      }
+      setStatus(
+        msg.status === 'dev_build' ? 'ローカルビルド (自動更新対象外)' : `${who} は最新です`
+      );
       break;
     }
     case 'debug_dump': {
@@ -745,14 +782,16 @@ function render(msg) {
       // auto の review_prompt → start が競合で弾かれた場合も含め、待ち状態を解除
       // して次の tick で再試行できるようにする (固着防止、Web Review 3 周目指摘)。
       autoPendingKey = '';
+      rollbackAutoMark();
       setStatus('busy: 既にセッションが走っています (-p / terminal は同時 1 本)');
       break;
     case 'error':
       // review_prompt がエラーで返らなかった場合に auto が永久待ちにならないよう解除。
       autoPendingKey = '';
+      rollbackAutoMark();
       add('ev-error', `error: ${msg.error}`);
       if (/unknown cmd: (review_prompt|resume)/.test(msg.error || '')) {
-        add('ev-error', 'agent が古い可能性があります — 「更新確認」で agent を更新してください');
+        add('ev-error', 'agent が古い可能性があります — panel を開き直すと自動で更新確認されます');
       }
       setStatus('error');
       break;
@@ -763,6 +802,7 @@ function render(msg) {
       termRunning = false;
       autoPendingKey = '';
       consoleRun = false;
+      rollbackAutoMark(); // spawn 前に host が落ちた場合も既読マークを戻す
       setStatus(`host 切断${msg.error ? `: ${msg.error}` : ''}`);
       add('ev-error', `host 切断${msg.error ? `: ${msg.error}` : ''}`);
       break;

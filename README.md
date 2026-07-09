@@ -64,8 +64,12 @@ Claude in Chrome 拡張 v1.0.36+ も。
   `cc-webreview-agent-<tag>-x86_64-pc-windows-msvc.zip` を DL → **minisign 署名検証**
   (`.minisig`、公開鍵は update.rs にハードコード) → `self_replace`。**次回起動から反映**。
 - **同梱拡張**: install dir の `extension\` を最新の `cc-webreview-extension-<tag>.zip`
-  (こちらも署名検証必須) で上書きし、side panel に「リロードで反映」を通知
+  (こちらも署名検証必須) で上書きし、side panel **上部に「拡張をリロード」ボタン**を出す
   (`.ext-version` marker で適用済み tag を記録)。
+
+更新確認は **panel を開いた時に自動実行** (10 分 TTL で GitHub API を節約)。手動の
+「更新確認」ボタンは無い — 最新なら status 表示のみ、適用があった時だけボタンが出る。
+`--chrome` チェックは `chrome.storage.local` に永続化され、開くたびに入れ直す必要はない。
 
 ローカルビルド (tag なし) は自動更新しない (開発中の自分を上書きしない)。
 署名の秘密鍵は org secret `MINISIGN_SECRET_KEY` (cdp-relay と共用)、release workflow
