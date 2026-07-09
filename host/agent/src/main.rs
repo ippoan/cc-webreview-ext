@@ -244,7 +244,8 @@ fn run_native_host() {
                     emit(json!({ "type": "error", "error": "prompt が空" }));
                     continue;
                 }
-                let Some(sid) = session::load_last_session_id() else {
+                // pr_key があれば per-PR の記録を優先、無ければグローバル直近 (#5 後続 (a))。
+                let Some(sid) = session::load_session_id_for(start.pr_key.as_deref()) else {
                     emit(json!({
                         "type": "error",
                         "error": "resume できるセッションが無い (直近の -p セッション記録が未作成)",

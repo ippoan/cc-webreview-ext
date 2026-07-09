@@ -32,6 +32,10 @@ pub struct StartRequest {
     /// `--resume <sid>` (#5 失敗時の導線)。拡張からは渡せない — `{cmd:"resume"}` 受信時に
     /// host が last_session.json から読んで埋める。
     pub resume_session_id: Option<String>,
+    /// レビュー対象 PR の key ("repo#number")。session_id と紐付けて state に永続化し、
+    /// per-PR resume (docs/plan-review-flow.md 指摘3 の後続 (a)) を可能にする。
+    /// レビュー以外の起動では None のままで良い。
+    pub pr_key: Option<String>,
 }
 
 /// 拡張 → host の制御メッセージ。
@@ -131,6 +135,11 @@ fn parse_start_request(v: &Value) -> StartRequest {
             .filter(|s| !s.is_empty()),
         allowed_tools: str_array("allowed_tools"),
         resume_session_id: None,
+        pr_key: v
+            .get("pr_key")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|s| !s.is_empty()),
     }
 }
 
@@ -175,6 +184,8 @@ pub fn extract_session_id(v: &Value) -> Option<String> {
 pub struct Session {
     child: Child,
     pub last_session_id: Arc<Mutex<Option<String>>>,
+    /// per-PR resume 用 (state 永続化時に session_id と紐付ける)。
+    pr_key: Option<String>,
 }
 
 impl Session {
@@ -187,7 +198,10 @@ impl Session {
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        persist_session_id(&self.last_session_id.lock().unwrap().clone());
+        persist_session_id(
+            &self.last_session_id.lock().unwrap().clone(),
+            self.pr_key.as_deref(),
+        );
     }
 }
 
@@ -282,6 +296,7 @@ pub fn spawn_claude<W: Write + Send + 'static>(
     Ok(Session {
         child,
         last_session_id,
+        pr_key: req.pr_key.clone(),
     })
 }
 
@@ -296,7 +311,7 @@ pub fn reap_if_exited<W: Write + Send + 'static>(
     match session.child.try_wait() {
         Ok(Some(status)) => {
             let sid = session.last_session_id.lock().unwrap().clone();
-            persist_session_id(&sid);
+            persist_session_id(&sid, session.pr_key.as_deref());
             let msg = json!({
                 "type": "proc",
                 "event": "exit",
@@ -311,36 +326,68 @@ pub fn reap_if_exited<W: Write + Send + 'static>(
     }
 }
 
-/// state ファイルから直近 session_id を読む (`{cmd:"resume"}` 用、#5)。
-/// state はグローバル 1 本のため、複数 PR を続けて回すと**直近の別 PR セッション**を
-/// 掴みうる — UI 側で「resume は直近 1 件のみ」と明示する (per-PR map 化は後続)。
-pub fn load_last_session_id() -> Option<String> {
+/// state ファイルから resume 対象の session_id を読む (`{cmd:"resume"}` 用、#5)。
+/// `pr_key` があれば per-PR map (`sessions`) を優先し、無ければグローバル直近
+/// (`session_id`) にフォールバックする (per-PR map 化 = plan 指摘3 の後続 (a))。
+pub fn load_session_id_for(pr_key: Option<&str>) -> Option<String> {
     let dir = register::data_dir().ok()?;
     let s = std::fs::read_to_string(dir.join("last_session.json")).ok()?;
-    session_id_from_state_json(&s)
+    session_id_from_state_json(&s, pr_key)
 }
 
 /// last_session.json の中身から session_id を取り出す (純関数)。
-pub fn session_id_from_state_json(s: &str) -> Option<String> {
-    serde_json::from_str::<Value>(s)
-        .ok()?
-        .get("session_id")?
-        .as_str()
-        .map(str::to_string)
-        .filter(|s| !s.is_empty())
+/// 形式: `{"session_id": "<直近>", "sessions": {"repo#n": "<sid>", ...}}`。
+/// 旧形式 (`session_id` のみ) もそのまま読める。
+pub fn session_id_from_state_json(s: &str, pr_key: Option<&str>) -> Option<String> {
+    let v = serde_json::from_str::<Value>(s).ok()?;
+    let pick = |x: Option<&Value>| {
+        x.and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(key) = pr_key {
+        if let Some(sid) = pick(v.get("sessions").and_then(|m| m.get(key))) {
+            return Some(sid);
+        }
+    }
+    pick(v.get("session_id"))
+}
+
+/// 既存 state に (sid, pr_key) を merge した新 state JSON を作る (純関数)。
+/// `session_id` (グローバル直近) は常に更新、`pr_key` があれば `sessions` map にも書く。
+/// 既存が parse できない場合は捨てて作り直す (state は resume 補助であり正でない)。
+pub fn merge_session_state(existing: &str, sid: &str, pr_key: Option<&str>) -> String {
+    let mut root = serde_json::from_str::<Value>(existing)
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let obj = root.as_object_mut().expect("object を保証済み");
+    obj.insert("session_id".to_string(), json!(sid));
+    if let Some(key) = pr_key {
+        let sessions = obj
+            .entry("sessions".to_string())
+            .or_insert_with(|| json!({}));
+        if !sessions.is_object() {
+            *sessions = json!({});
+        }
+        sessions
+            .as_object_mut()
+            .expect("object にした直後")
+            .insert(key.to_string(), json!(sid));
+    }
+    root.to_string()
 }
 
 /// 直近 session_id を state ファイルに永続化する (`--resume` 用)。best-effort。
-fn persist_session_id(sid: &Option<String>) {
+fn persist_session_id(sid: &Option<String>, pr_key: Option<&str>) {
     let Some(sid) = sid else { return };
     let Ok(dir) = register::data_dir() else {
         return;
     };
     let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(
-        dir.join("last_session.json"),
-        json!({ "session_id": sid }).to_string(),
-    );
+    let path = dir.join("last_session.json");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::write(path, merge_session_state(&existing, sid, pr_key));
 }
 
 /// `.cmd` / `.bat` (npm shim) は直接 spawn できないので cmd /C 経由にする。
@@ -529,13 +576,92 @@ mod tests {
 
     #[test]
     fn session_id_from_state_json_variants() {
+        // 旧形式 (session_id のみ) も読める
         assert_eq!(
-            session_id_from_state_json(r#"{"session_id":"abc-1"}"#),
+            session_id_from_state_json(r#"{"session_id":"abc-1"}"#, None),
             Some("abc-1".to_string())
         );
-        assert_eq!(session_id_from_state_json(r#"{"session_id":""}"#), None);
-        assert_eq!(session_id_from_state_json("{}"), None);
-        assert_eq!(session_id_from_state_json("壊れてる"), None);
+        assert_eq!(
+            session_id_from_state_json(r#"{"session_id":""}"#, None),
+            None
+        );
+        assert_eq!(session_id_from_state_json("{}", None), None);
+        assert_eq!(session_id_from_state_json("壊れてる", None), None);
+    }
+
+    #[test]
+    fn per_pr_session_lookup_and_fallback() {
+        let state = r#"{"session_id":"global-1","sessions":{"o/r#7":"sid-7","o/r#8":"sid-8"}}"#;
+        // pr_key があれば per-PR を優先
+        assert_eq!(
+            session_id_from_state_json(state, Some("o/r#7")),
+            Some("sid-7".to_string())
+        );
+        // 未知の pr_key はグローバル直近にフォールバック
+        assert_eq!(
+            session_id_from_state_json(state, Some("o/r#99")),
+            Some("global-1".to_string())
+        );
+        // pr_key 無しはグローバル直近
+        assert_eq!(
+            session_id_from_state_json(state, None),
+            Some("global-1".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_session_state_builds_map() {
+        // 空 → 新規作成
+        let s1 = merge_session_state("", "sid-1", Some("o/r#7"));
+        assert_eq!(
+            session_id_from_state_json(&s1, Some("o/r#7")),
+            Some("sid-1".to_string())
+        );
+        // 別 PR を追記しても既存 entry は残り、グローバル直近は更新される
+        let s2 = merge_session_state(&s1, "sid-2", Some("o/r#8"));
+        assert_eq!(
+            session_id_from_state_json(&s2, Some("o/r#7")),
+            Some("sid-1".to_string())
+        );
+        assert_eq!(
+            session_id_from_state_json(&s2, Some("o/r#8")),
+            Some("sid-2".to_string())
+        );
+        assert_eq!(
+            session_id_from_state_json(&s2, None),
+            Some("sid-2".to_string())
+        );
+        // pr_key 無しの起動はグローバル直近だけ更新
+        let s3 = merge_session_state(&s2, "sid-3", None);
+        assert_eq!(
+            session_id_from_state_json(&s3, Some("o/r#8")),
+            Some("sid-2".to_string())
+        );
+        assert_eq!(
+            session_id_from_state_json(&s3, None),
+            Some("sid-3".to_string())
+        );
+        // 壊れた既存 state は捨てて作り直す
+        let s4 = merge_session_state("[1,2]", "sid-4", Some("o/r#9"));
+        assert_eq!(
+            session_id_from_state_json(&s4, Some("o/r#9")),
+            Some("sid-4".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_start_with_pr_key() {
+        let v = json!({ "cmd": "start", "prompt": "x", "pr_key": "o/r#7" });
+        let HostCommand::Start(req) = parse_command(&v) else {
+            panic!("Start になるはず");
+        };
+        assert_eq!(req.pr_key.as_deref(), Some("o/r#7"));
+        // 空文字は None に落とす
+        let v = json!({ "cmd": "start", "prompt": "x", "pr_key": "" });
+        let HostCommand::Start(req) = parse_command(&v) else {
+            panic!("Start になるはず");
+        };
+        assert!(req.pr_key.is_none());
     }
 
     #[test]

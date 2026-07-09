@@ -22,6 +22,7 @@ function beginRun() {
   lastCommentUrl = '';
   lastSystemRow = null;
   lastSystemSubtype = '';
+  consoleRun = false; // auto/console 実行側は beginRun の後で true に立て直す
   // 再実行時はバナーを一旦引っ込め、新セッションで再検知させる。
   authBannerSticky = false;
   authBanner.hidden = true;
@@ -38,23 +39,31 @@ document.getElementById('start').addEventListener('click', () => {
   }
   const extraArgs = beginRun();
   reviewRun = reviewAllowedTools.length > 0;
+  // prompt がレビューテンプレ由来 (本文に PR key を含む) の時だけ pr_key を添える —
+  // 無関係な手動 prompt で per-PR resume 記録を汚さない。
+  const prKeyArg =
+    lastReviewPrKey && prompt.includes(lastReviewPrKey) ? lastReviewPrKey : undefined;
   port.postMessage({
     cmd: 'start',
     prompt,
     chrome: chromeEl.checked,
     extra_args: extraArgs,
     allowed_tools: reviewAllowedTools,
+    pr_key: prKeyArg,
   });
   setStatus('起動中…');
 });
-// 「続きから」(#5 失敗時の導線): 直近の -p セッションを --resume で再開する。
-// last_session.json はグローバル 1 本 = **resume は直近 1 件のみ** (複数 PR を続けて
-// 回した場合、最後に走った別 PR のセッションを掴む — per-PR resume は後続対応)。
+// 「続きから」(#5 失敗時の導線): -p セッションを --resume で再開する。
+// pr_key (直近にテンプレ取得した PR) を添えると host が per-PR の記録を優先し、
+// 無ければグローバル直近にフォールバックする (取り違え防止、plan 指摘3 後続 (a))。
 document.getElementById('resume').addEventListener('click', () => {
   const extraArgs = beginRun();
   // resume はレビュー専用導線: パネル再読み込みで reviewAllowedTools が空でも
   // review 扱いにする (allowlist は host がレビュー既定を補う。#27 Web Review 指摘)。
   reviewRun = true;
+  ensureTerm().reset();
+  consoleRun = true;
+  cwrite(`▶ resume${lastReviewPrKey ? `: ${lastReviewPrKey}` : ' (直近セッション)'}`, '1');
   port.postMessage({
     cmd: 'resume',
     prompt:
@@ -63,8 +72,13 @@ document.getElementById('resume').addEventListener('click', () => {
     chrome: chromeEl.checked,
     extra_args: extraArgs,
     allowed_tools: reviewAllowedTools,
+    pr_key: lastReviewPrKey || undefined,
   });
-  setStatus('直近セッションを resume 中… (resume は直近 1 件のみ)');
+  setStatus(
+    lastReviewPrKey
+      ? `${lastReviewPrKey} のセッションを resume 中…`
+      : '直近セッションを resume 中… (パネル再読み込み後は直近 1 件)'
+  );
 });
 document.getElementById('stop').addEventListener('click', () => port.postMessage({ cmd: 'stop' }));
 document.getElementById('ping').addEventListener('click', () => port.postMessage({ cmd: 'ping' }));
@@ -100,6 +114,9 @@ const prMetaEl = document.getElementById('prMeta');
 let reviewAllowedTools = [];
 // この run がレビュー実行か (完了時の「コメント URL 未検出」警告の出し分けに使う)。
 let reviewRun = false;
+// 直近にテンプレを取得した PR の key ("repo#number")。start/resume に pr_key として
+// 添えると host が session_id と紐付けて永続化し、per-PR resume が効く。
+let lastReviewPrKey = '';
 // gh pr comment の stdout (tool_result) から拾ったコメント URL。第一候補は tool_result、
 // result 本文の URL 単独行はフォールバック (docs/plan-review-flow.md 指摘2)。
 let lastCommentUrl = '';
@@ -158,29 +175,96 @@ setInterval(() => {
   if (autoEl.checked && !termRunning && !pRunning && !autoPendingKey) loadDraftPrs();
 }, 60_000);
 
-// terminal 起動直後に流し込む本文 (claude が bracketed paste を有効化したら送る)。
-let pendingTermPaste = '';
+// --- auto レビューのコンソール描画 ---------------------------------------
+// auto 実行は -p (stream-json) で走らせつつ、イベントを xterm に terminal 風の
+// テキストとして描く。対話 terminal で自動実行しないのは、interactive claude は
+// レビュー完了後も自然終了せず「1 PR 終了 → 次へ」の queue が進まないため。
+// -p なら result / exit が構造イベントで確定し、URL 抽出・完了検知・queue 前進が
+// 確実に動く。見え方は terminal と同じ (tool 実行と結果が生テキストで流れ、
+// コピーすればそのまま CCoW に共有できる — timeline の折りたたみと違い全文乗る)。
+let consoleRun = false;
 
-// auto レビューを terminal モードで開始する: term_start (--allowedTools を対話にも
-// 適用) → claude の入力欄準備 (ESC[?2004h) を term_out で検知 → テンプレを bracketed
-// paste で流し込み → Enter を自動送信。1 PR = 1 terminal セッションで、終了
-// (term_exit) 後に次の未レビュー PR を拾う。
-function startAutoTermReview(key, prompt) {
+// xterm へ 1 行書く (LF → CRLF 変換 + SGR 色)。
+function cwrite(text, sgr) {
   const t = ensureTerm();
-  t.reset();
-  const extraArgs = extraArgsEl.value.trim() ? extraArgsEl.value.trim().split(/\s+/) : [];
-  if (reviewAllowedTools.length) {
-    extraArgs.push('--allowedTools', reviewAllowedTools.join(','));
-  }
-  pendingTermPaste = prompt;
+  const body = String(text).replace(/\r?\n/g, '\r\n');
+  t.write(sgr ? `\x1b[${sgr}m${body}\x1b[0m\r\n` : `${body}\r\n`);
+}
+
+// auto レビューを -p + コンソール描画で開始する。
+function startAutoConsoleReview(key, prompt) {
+  const extraArgs = beginRun();
+  ensureTerm().reset();
+  consoleRun = true;
+  cwrite(`▶ 自動レビュー: ${key}`, '1');
   port.postMessage({
-    cmd: 'term_start',
-    cols: t.cols,
-    rows: t.rows,
+    cmd: 'start',
+    prompt,
     chrome: chromeEl.checked,
     extra_args: extraArgs,
+    allowed_tools: reviewAllowedTools,
+    pr_key: key,
   });
-  setStatus(`自動レビュー (terminal): ${key} を起動中…`);
+  setStatus(`自動レビュー開始: ${key}`);
+}
+
+// -p イベントのコンソール描画 (consoleRun 中の renderClaudeEvent 相当)。
+// URL 抽出・認証エラー検知・status 更新は timeline 版と同じロジックを通す。
+function renderClaudeEventConsole(data) {
+  const t = data.type;
+  if (t === 'system') {
+    if (data.subtype === 'init') setStatus(`session 開始 (${data.session_id || '?'})`);
+    else if (data.subtype === 'thinking_tokens')
+      setStatus(`claude 思考中… (~${data.estimated_tokens != null ? data.estimated_tokens : '?'} tokens)`);
+    return; // system はコンソールに書かない (ノイズ)
+  }
+  if (t === 'assistant') {
+    for (const block of (data.message && data.message.content) || []) {
+      if (block.type === 'text' && block.text) {
+        cwrite(block.text);
+        lastAssistantText = block.text;
+      } else if (block.type === 'tool_use') {
+        cwrite(toolSummary(block), '36');
+      }
+    }
+    return;
+  }
+  if (t === 'user') {
+    for (const block of (data.message && data.message.content) || []) {
+      if (block.type === 'tool_result') {
+        const body =
+          typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
+        captureCommentUrl(String(body));
+        cwrite(String(body).slice(0, 4000), '2');
+      }
+    }
+    return;
+  }
+  if (t === 'result') {
+    setStatus(`完了 (${data.subtype || 'result'})`);
+    const resultText = typeof data.result === 'string' ? data.result : '';
+    detectAuthError(resultText);
+    captureCommentUrl(resultText);
+    if (resultText.trim() && resultText.trim() !== lastAssistantText.trim()) cwrite(resultText);
+    cwrite(
+      `✔ 完了 (${data.subtype || 'result'}) cost: $${data.total_cost_usd != null ? data.total_cost_usd : '?'} / turns: ${data.num_turns != null ? data.num_turns : '?'}`,
+      '32'
+    );
+    if (lastCommentUrl) {
+      cwrite(`投稿コメント: ${lastCommentUrl}`, '32');
+      // クリック可能なリンクは timeline 側にも 1 行残す (xterm はリンク化されない)。
+      const div = add('ev-result', '');
+      const a = document.createElement('a');
+      a.href = lastCommentUrl;
+      a.target = '_blank';
+      a.rel = 'noreferrer';
+      a.textContent = `投稿コメント: ${lastCommentUrl}`;
+      div.appendChild(a);
+    } else if (reviewRun) {
+      cwrite('⚠ コメント URL を検出できませんでした — 「続きから」で再開できます', '31');
+    }
+    return;
+  }
 }
 
 function renderPrList(prs, updatedAt) {
@@ -521,7 +605,8 @@ function render(msg) {
       applyAuthStatus(msg.auth);
       break;
     case 'claude':
-      renderClaudeEvent(msg.data || {});
+      if (consoleRun) renderClaudeEventConsole(msg.data || {});
+      else renderClaudeEvent(msg.data || {});
       break;
     case 'review_prompt': {
       // host が差し込んだレビューテンプレ (#5)。terminal 起動中は claude の入力欄へ、
@@ -529,17 +614,16 @@ function render(msg) {
       const p = msg.prompt || '';
       reviewAllowedTools = msg.allowed_tools || [];
       const ref = msg.pr ? `${msg.pr.repo}#${msg.pr.number}` : '';
+      lastReviewPrKey = ref;
       if (autoPendingKey && ref === autoPendingKey) {
-        // auto mode (#29): テンプレを受けたら terminal モードで自動実行する。
-        // -p (timeline) ではなく terminal にするのは実行過程の視認性のため —
-        // tool 実行と結果が生画面で見え、コピーすればそのまま CCoW にも共有できる
-        // (timeline の折りたたみ tool_result はコピーに乗らない)。
+        // auto mode (#29): テンプレを受けたら -p + コンソール描画で自動実行する
+        // (startAutoConsoleReview 冒頭のコメント参照)。
         autoPendingKey = '';
         if (termRunning || pRunning) break; // 競合したら次の tick で再試行
         reviewRun = true;
         reviewedPrs[ref] = Date.now();
         chrome.storage.local.set({ reviewedPrs });
-        startAutoTermReview(ref, p);
+        startAutoConsoleReview(ref, p);
         break;
       }
       if (termRunning) {
@@ -559,16 +643,22 @@ function render(msg) {
     }
     case 'raw':
       detectAuthError(msg.data);
-      add('ev-stderr', `raw: ${msg.data}`);
+      if (consoleRun) cwrite(`raw: ${msg.data}`, '31');
+      else add('ev-stderr', `raw: ${msg.data}`);
       break;
     case 'stderr':
       detectAuthError(msg.data);
-      add('ev-stderr', msg.data);
+      if (consoleRun) cwrite(msg.data, '31');
+      else add('ev-stderr', msg.data);
       break;
     case 'proc':
       if (msg.event === 'spawn') pRunning = true;
       if (msg.event === 'exit' || msg.event === 'killed') {
         pRunning = false;
+        if (consoleRun) {
+          cwrite(`— claude 終了 (code=${msg.code != null ? msg.code : '?'})`, '2');
+          consoleRun = false;
+        }
         // auto mode: セッション終了後に一覧を再取得して次の未レビュー PR を拾う。
         if (autoEl.checked) setTimeout(loadDraftPrs, 3000);
       }
@@ -619,30 +709,12 @@ function render(msg) {
         .catch((e) => setStatus(`クリップボード書き込み失敗 (${e}) — 下の折りたたみから手動でコピーしてください`));
       break;
     }
-    case 'term_out': {
+    case 'term_out':
       // replay で panel 再オープン時にも描き直せるよう、受信側でも ensure する。
-      const bytes = b64ToBytes(msg.data || '');
-      ensureTerm().write(bytes);
-      if (pendingTermPaste) {
-        // claude が bracketed paste を有効化 (ESC[?2004h) = 入力欄準備完了の合図。
-        let s = '';
-        for (const b of bytes) s += String.fromCharCode(b);
-        if (s.includes('[?2004h')) {
-          const p = pendingTermPaste;
-          pendingTermPaste = '';
-          port.postMessage({ cmd: 'term_input', data: `\x1b[200~${p}\x1b[201~` });
-          // 送信の Enter は paste の描画が落ち着いてから (即続けると取りこぼす端末がある)。
-          setTimeout(() => {
-            if (termRunning) port.postMessage({ cmd: 'term_input', data: '\r' });
-          }, 500);
-          setStatus('自動レビュー: プロンプトを送信しました — terminal で進行を確認できます');
-        }
-      }
+      ensureTerm().write(b64ToBytes(msg.data || ''));
       break;
-    }
     case 'term_exit':
       termRunning = false;
-      pendingTermPaste = '';
       setStatus(`terminal 終了 (code=${msg.code})`);
       add('ev-proc', `terminal 終了 (code=${msg.code})`);
       termKillBtn.hidden = true;
@@ -673,7 +745,7 @@ function render(msg) {
       pRunning = false;
       termRunning = false;
       autoPendingKey = '';
-      pendingTermPaste = '';
+      consoleRun = false;
       setStatus(`host 切断${msg.error ? `: ${msg.error}` : ''}`);
       add('ev-error', `host 切断${msg.error ? `: ${msg.error}` : ''}`);
       break;
